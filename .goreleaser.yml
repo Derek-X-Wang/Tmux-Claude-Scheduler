@@ -1,0 +1,160 @@
+# GoReleaser configuration for TCS (Tmux Claude Scheduler)
+version: 2
+
+# Build configuration
+builds:
+  - main: ./main.go
+    binary: tcs
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    # Build flags
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+
+# Archive configuration
+archives:
+  - format: tar.gz
+    # Use zip for windows archives
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - README.md
+      - LICENSE
+      - config.yaml
+
+# Release configuration
+release:
+  github:
+    owner: derekxwang
+    name: tcs
+  draft: false
+  prerelease: auto
+  name_template: "TCS v{{.Version}}"
+  header: |
+    ## TCS (Tmux Claude Scheduler) {{.Version}}
+    
+    ### What's New
+    
+    This release includes improvements and bug fixes for the Tmux Claude Scheduler.
+    
+    ### Installation
+    
+    #### Homebrew (macOS)
+    ```bash
+    brew install derekxwang/tcs/tcs
+    ```
+    
+    #### Direct Download
+    Download the appropriate binary for your platform from the assets below.
+    
+  footer: |
+    ### Full Changelog
+    
+    See the [full changelog](https://github.com/derekxwang/tcs/compare/{{.PreviousTag}}...{{.Tag}}) for all changes.
+    
+    ### Support
+    
+    If you encounter any issues, please report them on [GitHub Issues](https://github.com/derekxwang/tcs/issues).
+
+# Homebrew tap configuration
+brews:
+  - name: tcs
+    repository:
+      owner: derekxwang
+      name: homebrew-tcs
+      branch: main
+    folder: Formula
+    homepage: "https://github.com/derekxwang/tcs"
+    description: "TCS (Tmux Claude Scheduler) - Maximize Claude subscription usage with smart scheduling"
+    license: "MIT"
+    skip_upload: false
+    
+    # Dependencies
+    dependencies:
+      - name: tmux
+        type: runtime
+    
+    # Installation
+    install: |
+      bin.install "tcs"
+      
+      # Install config file as example
+      etc.install "config.yaml" => "tcs/config.yaml.example"
+      
+      # Create config directory
+      (etc/"tcs").mkpath
+    
+    # Post-install message
+    caveats: |
+      TCS (Tmux Claude Scheduler) has been installed!
+      
+      To get started:
+      1. Ensure tmux is running: tmux new-session -d
+      2. Create your first session: tcs session add main claude:0 --priority 8
+      3. Launch the TUI: tcs tui
+      
+      Configuration file: ~/.config/tcs/config.yaml
+      Example config: #{etc}/tcs/config.yaml.example
+      
+      For more information, visit: https://github.com/derekxwang/tcs
+
+# Checksum configuration
+checksum:
+  name_template: 'checksums.txt'
+
+# Snapshot configuration (for non-tagged builds)
+snapshot:
+  name_template: "{{ incpatch .Version }}-next"
+
+# Changelog configuration
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^ci:'
+      - '^chore:'
+      - '^style:'
+      - '^refactor:'
+  groups:
+    - title: 'New Features'
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: 'Bug Fixes'
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: 'Performance Improvements'
+      regexp: '^.*?perf(\([[:word:]]+\))??!?:.+$'
+      order: 2
+    - title: 'Other Changes'
+      order: 999
+
+# Source archive
+source:
+  enabled: true
+  name_template: "{{ .ProjectName }}-{{ .Version }}-source"
+  format: tar.gz
+
+# Docker images (optional - uncomment if you want Docker support)  
+# dockers:
+#   - image_templates:
+#       - "ghcr.io/derekxwang/tcs:{{ .Version }}"
+#       - "ghcr.io/derekxwang/tcs:latest"
+#     dockerfile: Dockerfile
+#     build_flag_templates:
+#       - "--label=org.opencontainers.image.created={{.Date}}"
+#       - "--label=org.opencontainers.image.title={{.ProjectName}}"
+#       - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+#       - "--label=org.opencontainers.image.version={{.Version}}"

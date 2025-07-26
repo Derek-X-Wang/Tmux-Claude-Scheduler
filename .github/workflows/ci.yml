@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        go-version: ['1.22', '1.23']
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ matrix.go-version }}
+
+    - name: Install tmux (for tests)
+      run: sudo apt-get update && sudo apt-get install -y tmux
+
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-${{ matrix.go-version }}-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run tests
+      run: go test ./... -v -race -coverprofile=coverage.out
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v4
+      with:
+        file: ./coverage.out
+        flags: unittests
+        name: codecov-umbrella
+
+    - name: Build
+      run: go build -v ./...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.23'
+
+    - name: Run golangci-lint
+      uses: golangci/golangci-lint-action@v6
+      with:
+        version: latest
+
+  build-test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        go-version: ['1.23']
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ matrix.go-version }}
+
+    - name: Build
+      run: go build -v -o tcs ./main.go
+
+    - name: Test binary (Linux/macOS)
+      if: runner.os != 'Windows'
+      run: ./tcs --help
+
+    - name: Test binary (Windows)
+      if: runner.os == 'Windows'
+      run: .\tcs.exe --help
