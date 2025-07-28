@@ -268,6 +268,15 @@ func (c *Client) isClaudeWindow(content string) bool {
 		"I'm Claude",
 		"claude-3",
 		"I'm an AI assistant",
+		"Claude Code",
+		"claude-code",
+		"claude code",
+		"$ claude",
+		"> claude",
+		"# claude",
+		"Sonnet",
+		"claude-sonnet",
+		"model named",
 	}
 
 	contentLower := strings.ToLower(content)
@@ -353,6 +362,85 @@ func (c *Client) KillSession(sessionName string) error {
 	}
 
 	return nil
+}
+
+// DetectClaudeProcess checks if Claude Code process is running in the specified tmux pane
+func (c *Client) DetectClaudeProcess(target string) (bool, error) {
+	return c.DetectClaudeProcessWithNames(target, []string{"claude-code", "claude_code", "claude"})
+}
+
+// DetectClaudeProcessWithNames checks if any of the specified process names is running in the tmux pane
+func (c *Client) DetectClaudeProcessWithNames(target string, processNames []string) (bool, error) {
+	if err := c.ValidateTarget(target); err != nil {
+		return false, err
+	}
+
+	// Get the PID of the tmux pane
+	cmd := exec.Command("tmux", "list-panes", "-t", target, "-F", "#{pane_pid}")
+	output, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("failed to get pane PID: %w", err)
+	}
+
+	panePID := strings.TrimSpace(string(output))
+	if panePID == "" {
+		return false, fmt.Errorf("no pane PID found")
+	}
+
+	// Check for the specified processes
+	for _, processName := range processNames {
+		// Check if the process is running under this pane's process tree
+		cmd = exec.Command("pgrep", "-f", processName)
+		output, err = cmd.Output()
+		if err != nil {
+			continue // Process not found, try next
+		}
+
+		pids := strings.Split(strings.TrimSpace(string(output)), "\n")
+		for _, pid := range pids {
+			if pid == "" {
+				continue
+			}
+
+			// Check if this PID is related to our tmux pane
+			// We'll check if the process or its parent is related to tmux
+			if c.isProcessRelatedToPane(pid, panePID) {
+				return true, nil
+			}
+		}
+	}
+
+	return false, nil
+}
+
+// isProcessRelatedToPane checks if a process is related to the tmux pane
+func (c *Client) isProcessRelatedToPane(processPID, panePID string) bool {
+	// On macOS, pstree might not be available, use a different approach
+	// Check if the process has our pane PID as an ancestor
+	currentPID := processPID
+
+	// Walk up the process tree to find if panePID is an ancestor
+	for i := 0; i < 10; i++ { // Limit depth to avoid infinite loops
+		if currentPID == panePID {
+			return true
+		}
+
+		// Get parent PID
+		cmd := exec.Command("ps", "-o", "ppid=", "-p", currentPID)
+		output, err := cmd.Output()
+		if err != nil {
+			break
+		}
+
+		ppid := strings.TrimSpace(string(output))
+		if ppid == "" || ppid == "0" || ppid == "1" || ppid == currentPID {
+			break // Reached top of process tree or invalid PID
+		}
+
+		currentPID = ppid
+	}
+
+	return false
 }
 
 // GetServerInfo returns information about the tmux server

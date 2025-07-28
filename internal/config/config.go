@@ -62,6 +62,7 @@ type UsageConfig struct {
 	MaxTokens          int           `mapstructure:"max_tokens" json:"max_tokens"`
 	WindowDuration     time.Duration `mapstructure:"window_duration" json:"window_duration"`
 	MonitoringInterval time.Duration `mapstructure:"monitoring_interval" json:"monitoring_interval"`
+	ClaudeResetHour    int           `mapstructure:"claude_reset_hour" json:"claude_reset_hour"` // Hour of day when Claude usage resets (0-23)
 }
 
 // LoggingConfig holds logging configuration
@@ -73,9 +74,11 @@ type LoggingConfig struct {
 
 // TmuxConfig holds tmux configuration
 type TmuxConfig struct {
-	DiscoveryInterval   time.Duration `mapstructure:"discovery_interval" json:"discovery_interval"`
-	HealthCheckInterval time.Duration `mapstructure:"health_check_interval" json:"health_check_interval"`
-	MessageDelay        time.Duration `mapstructure:"message_delay" json:"message_delay"`
+	DiscoveryInterval     time.Duration `mapstructure:"discovery_interval" json:"discovery_interval"`
+	HealthCheckInterval   time.Duration `mapstructure:"health_check_interval" json:"health_check_interval"`
+	MessageDelay          time.Duration `mapstructure:"message_delay" json:"message_delay"`
+	ClaudeDetectionMethod string        `mapstructure:"claude_detection_method" json:"claude_detection_method"` // "process", "text", or "both"
+	ClaudeProcessNames    []string      `mapstructure:"claude_process_names" json:"claude_process_names"`       // Process names to look for
 }
 
 // global configuration instance
@@ -96,8 +99,8 @@ func Load(configPath string) (*Config, error) {
 	}
 
 	// Default config paths
-	homeDir, _ := os.UserConfigDir()
-	v.AddConfigPath(filepath.Join(homeDir, "tcs"))
+	homeDir, _ := os.UserHomeDir()
+	v.AddConfigPath(filepath.Join(homeDir, ".tcs"))
 	v.AddConfigPath(".")
 
 	// Environment variable configuration
@@ -159,6 +162,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("usage.max_tokens", 100000)
 	v.SetDefault("usage.window_duration", 5*time.Hour)
 	v.SetDefault("usage.monitoring_interval", 30*time.Second)
+	v.SetDefault("usage.claude_reset_hour", 11) // 11 AM reset time
 
 	// Logging defaults
 	v.SetDefault("logging.level", "info")
@@ -169,6 +173,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("tmux.discovery_interval", 30*time.Second)
 	v.SetDefault("tmux.health_check_interval", 60*time.Second)
 	v.SetDefault("tmux.message_delay", 500*time.Millisecond)
+	v.SetDefault("tmux.claude_detection_method", "both") // "process", "text", or "both"
+	v.SetDefault("tmux.claude_process_names", []string{"claude-code", "claude_code", "claude"})
 }
 
 // validateConfig validates the configuration
@@ -201,6 +207,11 @@ func validateConfig(config *Config) error {
 		return fmt.Errorf("usage window duration must be at least 1 hour")
 	}
 
+	// Validate Claude reset hour
+	if config.Usage.ClaudeResetHour < 0 || config.Usage.ClaudeResetHour > 23 {
+		return fmt.Errorf("claude reset hour must be between 0 and 23, got: %d", config.Usage.ClaudeResetHour)
+	}
+
 	// Validate logging level
 	validLevels := []string{"debug", "info", "warn", "error", "fatal"}
 	levelValid := false
@@ -219,12 +230,12 @@ func validateConfig(config *Config) error {
 
 // getDefaultDatabasePath returns the default database path
 func getDefaultDatabasePath() string {
-	homeDir, err := os.UserConfigDir()
+	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		homeDir = os.TempDir()
 	}
 
-	configDir := filepath.Join(homeDir, "tcs")
+	configDir := filepath.Join(homeDir, ".tcs")
 	return filepath.Join(configDir, "tcs.db")
 }
 
@@ -282,6 +293,7 @@ func GetUsageConfig() UsageConfig {
 			MaxTokens:          100000,
 			WindowDuration:     5 * time.Hour,
 			MonitoringInterval: 30 * time.Second,
+			ClaudeResetHour:    11,
 		}
 	}
 	return appConfig.Usage
@@ -347,12 +359,12 @@ func SaveConfig(configPath string) error {
 
 // getDefaultConfigPath returns the default config file path
 func getDefaultConfigPath() string {
-	homeDir, err := os.UserConfigDir()
+	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		homeDir = os.TempDir()
 	}
 
-	configDir := filepath.Join(homeDir, "tcs")
+	configDir := filepath.Join(homeDir, ".tcs")
 	return filepath.Join(configDir, "config.yaml")
 }
 
@@ -389,6 +401,7 @@ func GenerateDefaultConfig(configPath string) error {
 			MaxTokens:          100000,
 			WindowDuration:     5 * time.Hour,
 			MonitoringInterval: 30 * time.Second,
+			ClaudeResetHour:    11,
 		},
 		Logging: LoggingConfig{
 			Level:  "info",

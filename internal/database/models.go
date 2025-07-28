@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 // Message represents a scheduled message (window-based architecture)
@@ -240,7 +241,9 @@ func CreateOrUpdateTmuxWindow(db *gorm.DB, sessionName string, windowIndex int, 
 	target := fmt.Sprintf("%s:%d", sessionName, windowIndex)
 
 	var window TmuxWindow
-	err := db.Where("target = ?", target).First(&window).Error
+	// Use silent logger for expected "record not found" during window discovery
+	err := db.Session(&gorm.Session{Logger: db.Logger.LogMode(logger.Silent)}).
+		Where("target = ?", target).First(&window).Error
 
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {

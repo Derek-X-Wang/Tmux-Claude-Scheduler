@@ -6,7 +6,9 @@ A Go CLI tool that maximizes Claude subscription usage by monitoring 5-hour usag
 
 ## Features
 
-- **5-Hour Usage Window Tracking**: Automatically tracks Claude's 5-hour usage windows that start from the first message
+- **Real Claude Usage Tracking**: Reads actual Claude usage data from `~/.claude` directory and aligns with Claude's 11 AM reset schedule
+- **5-Hour Usage Window Monitoring**: Automatically tracks Claude's official 5-hour usage windows with accurate timing
+- **One-Command Setup**: `tcs init` command handles complete setup in one go
 - **Smart Message Scheduling**: Priority-based message queue with intelligent scheduling
 - **Tmux Integration**: Send messages to Claude running in tmux sessions with proper timing
 - **Window-Based Architecture**: Automatically discover and manage Claude instances in tmux windows
@@ -16,7 +18,7 @@ A Go CLI tool that maximizes Claude subscription usage by monitoring 5-hour usag
 - **Auto-discovery**: Automatically discover tmux windows containing Claude
 - **Message Queue Management**: Grouped by session for easy organization
 - **Message Editing**: Edit message content, priority, and schedule time through TUI
-- **Usage Monitoring**: Real-time tracking of message usage and remaining time
+- **Real-time Usage Monitoring**: Live tracking of actual message usage and time until reset
 - **Session Health Checks**: Monitor tmux session connectivity and Claude presence
 
 ## Installation
@@ -47,6 +49,8 @@ This installs the binary to `/usr/local/bin/tcs`.
 
 ## Quick Start
 
+### Option 1: One-Command Setup (Recommended)
+
 1. Start tmux and open Claude in tmux windows:
    ```bash
    tmux new-session -s project
@@ -54,38 +58,61 @@ This installs the binary to `/usr/local/bin/tcs`.
    # Create additional windows as needed: Ctrl+B, C
    ```
 
-2. Let TCS discover your Claude windows:
+2. Initialize TCS with complete setup:
    ```bash
-   tcs windows scan
+   tcs init
    ```
+   
+   This single command will:
+   - Generate default configuration file
+   - Initialize the database
+   - Scan and discover your tmux windows with Claude detection
+   - Set up real-time Claude usage monitoring (aligned with 11 AM reset)
+   - Show current status and provide next steps
 
-3. Schedule a message to a specific window:
+3. You're ready! Schedule messages, view status, or launch the TUI:
    ```bash
    tcs message add project:0 "Hello Claude!" --priority 5 --when now
-   ```
-
-4. View status:
-   ```bash
    tcs status
-   ```
-
-5. Launch the TUI dashboard:
-   ```bash
    tcs tui
    ```
+
+### Option 2: Manual Setup
+
+If you prefer manual setup or need more control:
+
+1. Start tmux and open Claude in tmux windows
+2. Generate configuration: `tcs config init`
+3. Discover Claude windows: `tcs window scan`
+4. View status: `tcs status`
+5. Launch TUI dashboard: `tcs tui`
 
 ## Usage
 
 ### CLI Commands
 
+#### Initial Setup
+
+```bash
+# One-command setup (recommended for new users)
+tcs init
+
+# This will:
+# - Generate default configuration file
+# - Initialize database
+# - Scan and discover tmux windows with Claude detection
+# - Set up real-time Claude usage monitoring
+# - Show current status and next steps
+```
+
 #### Window Management
 
 ```bash
 # Scan for Claude windows
-tcs windows scan
+tcs window scan
 
 # List discovered windows
-tcs windows list
+tcs window list
 
 # List message queues (grouped by session)
 tcs queue list
@@ -244,6 +271,7 @@ usage:
   max_tokens: 100000         # Token limit (if applicable)
   window_duration: "5h"      # Usage window duration
   monitoring_interval: "30s"
+  claude_reset_hour: 11      # Hour when Claude usage resets (0-23, default: 11 AM)
 
 # Logging configuration
 logging:
@@ -281,9 +309,10 @@ tmux:
    - Target format: "session:window"
 
 4. **Usage Monitor**
-   - 5-hour window tracking from first message
-   - Real-time usage statistics
-   - Message and token counting
+   - Real Claude data integration via `~/.claude` directory
+   - 5-hour window tracking aligned with Claude's 11 AM reset schedule
+   - Live usage statistics from actual Claude usage data
+   - Message and token counting with real-time sync
 
 5. **Smart Scheduler**
    - Window-based priority queues
@@ -366,10 +395,11 @@ tcs/
 ├── cmd/                    # CLI commands
 │   └── root.go
 ├── internal/
+│   ├── claude/            # Claude data integration (reads ~/.claude)
 │   ├── config/            # Configuration management
 │   ├── database/          # Database models and operations
 │   ├── discovery/         # Window discovery system
-│   ├── monitor/           # Usage monitoring
+│   ├── monitor/           # Usage monitoring with real Claude data
 │   ├── scheduler/         # Message scheduling logic
 │   ├── tmux/              # Tmux integration
 │   ├── tui/               # Terminal UI components
@@ -412,18 +442,26 @@ GOOS=windows GOARCH=amd64 make build
 1. **"tmux server is not running"**
    - Start tmux: `tmux new-session -d`
    - Verify tmux is running: `tmux ls`
+   - Run `tcs init` again after starting tmux
 
-2. **"Window target not found"**
-   - Check discovered windows: `tcs windows list`
-   - Scan for new windows: `tcs windows scan`
+2. **"Window target not found" or "record not found" errors**
+   - Run `tcs init` to set up everything properly
+   - Or manually: Check discovered windows: `tcs window list`
+   - Scan for new windows: `tcs window scan`
    - Verify tmux target: `tmux list-windows`
    - Use format "session:window" (e.g., "project:0")
 
 3. **"Cannot send messages" (usage limit)**
    - Check current usage: `tcs status`
-   - Wait for the 5-hour window to reset
+   - Wait for the 5-hour window to reset (shows time remaining)
+   - TCS now reads real Claude usage data for accurate limits
 
-4. **TUI won't start**
+4. **Incorrect usage statistics**
+   - Ensure `~/.claude` directory exists and contains usage data
+   - TCS reads actual Claude usage from JSONL files
+   - Run `tcs init` to refresh usage monitoring setup
+
+5. **TUI won't start**
    - Ensure you're in a proper terminal (not a pipe)
    - Try with a different terminal emulator
    - Check terminal capabilities: `echo $TERM`

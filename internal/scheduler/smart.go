@@ -25,8 +25,9 @@ type SmartScheduler struct {
 	mu    sync.RWMutex
 
 	// State
-	running  bool
-	stopChan chan bool
+	running     bool
+	stopChan    chan bool
+	triggerChan chan bool // Channel to trigger immediate processing
 }
 
 // MessageQueueItem represents an item in the priority queue
@@ -91,6 +92,7 @@ func NewSmartScheduler(
 		usageMonitor:  usageMonitor,
 		queue:         queue,
 		stopChan:      make(chan bool),
+		triggerChan:   make(chan bool, 1), // Buffered channel to avoid blocking
 	}
 }
 
@@ -166,6 +168,9 @@ func (ss *SmartScheduler) processQueue() {
 			return
 		case <-ticker.C:
 			ss.processNextMessage()
+		case <-ss.triggerChan:
+			// Immediate processing triggered
+			ss.processNextMessage()
 		}
 	}
 }
@@ -219,8 +224,13 @@ func (ss *SmartScheduler) processNextMessage() {
 		return
 	}
 
-	if !window.Active || !window.HasClaude {
-		log.Printf("Window %s not active or no Claude for message %d", window.Target, message.ID)
+	if !window.Active {
+		log.Printf("Message %d rejected: Window %s is not active", message.ID, window.Target)
+		return
+	}
+
+	if !window.HasClaude {
+		log.Printf("Message %d rejected: No Claude detected in window %s (try running 'tcs window scan' if Claude Code is running)", message.ID, window.Target)
 		return
 	}
 
@@ -312,6 +322,21 @@ func (ss *SmartScheduler) AddMessage(message *database.Message) {
 		Priority: message.Priority,
 	}
 	heap.Push(ss.queue, item)
+
+	// Trigger processing if running
+	if ss.running {
+		go ss.TriggerImmediateProcessing()
+	}
+}
+
+// TriggerImmediateProcessing triggers immediate message processing
+func (ss *SmartScheduler) TriggerImmediateProcessing() {
+	select {
+	case ss.triggerChan <- true:
+		// Trigger sent successfully
+	default:
+		// Channel is full (trigger already pending), skip
+	}
 }
 
 // GetQueueStatus returns current queue status

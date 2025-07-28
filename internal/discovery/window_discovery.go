@@ -10,6 +10,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"github.com/derekxwang/tcs/internal/config"
 	"github.com/derekxwang/tcs/internal/database"
 	"github.com/derekxwang/tcs/internal/tmux"
 )
@@ -218,14 +219,42 @@ func (wd *WindowDiscovery) processWindow(windowInfo tmux.WindowInfo) {
 	// Detect if window has Claude (if enabled)
 	hasClaude := false
 	if wd.config.ClaudeDetection {
-		content, err := wd.tmuxClient.CapturePane(windowInfo.Target, 50)
-		if err == nil {
-			hasClaude = wd.isClaudeWindow(content)
-			if hasClaude {
-				wd.mu.Lock()
-				wd.stats.ClaudeWindowsFound++
-				wd.mu.Unlock()
+		cfg := config.Get()
+		detectionMethod := cfg.Tmux.ClaudeDetectionMethod
+		processNames := cfg.Tmux.ClaudeProcessNames
+
+		switch detectionMethod {
+		case "process":
+			// Process-based detection only
+			processDetected, err := wd.tmuxClient.DetectClaudeProcessWithNames(windowInfo.Target, processNames)
+			if err == nil && processDetected {
+				hasClaude = true
 			}
+		case "text":
+			// Content-based detection only
+			content, err := wd.tmuxClient.CapturePane(windowInfo.Target, 50)
+			if err == nil {
+				hasClaude = wd.isClaudeWindow(content)
+			}
+		case "both":
+		default:
+			// Try process detection first (more reliable for Claude Code)
+			processDetected, err := wd.tmuxClient.DetectClaudeProcessWithNames(windowInfo.Target, processNames)
+			if err == nil && processDetected {
+				hasClaude = true
+			} else {
+				// Fallback to content-based detection
+				content, err := wd.tmuxClient.CapturePane(windowInfo.Target, 50)
+				if err == nil {
+					hasClaude = wd.isClaudeWindow(content)
+				}
+			}
+		}
+
+		if hasClaude {
+			wd.mu.Lock()
+			wd.stats.ClaudeWindowsFound++
+			wd.mu.Unlock()
 		}
 	}
 
@@ -314,6 +343,13 @@ func (wd *WindowDiscovery) isClaudeWindow(content string) bool {
 		"I'm an AI assistant",
 		"Claude Code",
 		"claude-code",
+		"claude code",
+		"$ claude",
+		"> claude",
+		"# claude",
+		"Sonnet",
+		"claude-sonnet",
+		"model named",
 	}
 
 	contentLower := strings.ToLower(content)

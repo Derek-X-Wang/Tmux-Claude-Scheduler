@@ -523,6 +523,26 @@ func (s *Scheduler) updateMessageStats(result *tmux.SendResult, err error) {
 	}
 }
 
+// AddMessage adds a message directly to the scheduler queue
+func (s *Scheduler) AddMessage(message *database.Message) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.smartScheduler != nil {
+		s.smartScheduler.AddMessage(message)
+	}
+}
+
+// TriggerImmediateProcessing triggers immediate message processing
+func (s *Scheduler) TriggerImmediateProcessing() {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.smartScheduler != nil {
+		s.smartScheduler.TriggerImmediateProcessing()
+	}
+}
+
 // GetStats returns current scheduler statistics
 func (s *Scheduler) GetStats() (*SchedulerStats, error) {
 	s.mu.RLock()

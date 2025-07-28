@@ -26,7 +26,7 @@ type Config struct {
 // DefaultConfig returns the default database configuration
 func DefaultConfig() *Config {
 	homeDir, _ := os.UserHomeDir()
-	configDir := filepath.Join(homeDir, ".config", "tcs")
+	configDir := filepath.Join(homeDir, ".tcs")
 
 	return &Config{
 		DatabasePath: filepath.Join(configDir, "tcs.db"),
@@ -160,10 +160,9 @@ func createCustomIndexes(db *gorm.DB) error {
 	indexes := []string{
 		"CREATE INDEX IF NOT EXISTS idx_messages_status_scheduled ON messages(status, scheduled_time)",
 		"CREATE INDEX IF NOT EXISTS idx_messages_priority_time ON messages(priority DESC, scheduled_time ASC)",
-		"CREATE INDEX IF NOT EXISTS idx_sessions_active_name ON sessions(active, name)",
 		"CREATE INDEX IF NOT EXISTS idx_usage_windows_active_time ON usage_windows(active, start_time, end_time)",
-		"CREATE INDEX IF NOT EXISTS idx_session_stats_date ON session_stats(date DESC)",
-		"CREATE INDEX IF NOT EXISTS idx_tmux_sessions_active ON tmux_sessions(active, has_claude)",
+		"CREATE INDEX IF NOT EXISTS idx_tmux_windows_active_claude ON tmux_windows(active, has_claude)",
+		"CREATE INDEX IF NOT EXISTS idx_tmux_windows_session ON tmux_windows(session_name, window_index)",
 	}
 
 	for _, indexSQL := range indexes {
@@ -193,7 +192,9 @@ func initializeDefaultData(db *gorm.DB) error {
 
 	for _, scheduler := range schedulers {
 		var existing SchedulerState
-		err := db.Where("name = ?", scheduler.Name).First(&existing).Error
+		// Use silent logger for expected "record not found" during initialization
+		err := db.Session(&gorm.Session{Logger: db.Logger.LogMode(logger.Silent)}).
+			Where("name = ?", scheduler.Name).First(&existing).Error
 		if err == gorm.ErrRecordNotFound {
 			if err := db.Create(&scheduler).Error; err != nil {
 				return fmt.Errorf("failed to create scheduler state %s: %w", scheduler.Name, err)
@@ -211,7 +212,9 @@ func initializeDefaultData(db *gorm.DB) error {
 
 	for key, value := range defaultConfigs {
 		var existing AppConfig
-		err := db.Where("key = ?", key).First(&existing).Error
+		// Use silent logger for expected "record not found" during initialization
+		err := db.Session(&gorm.Session{Logger: db.Logger.LogMode(logger.Silent)}).
+			Where("key = ?", key).First(&existing).Error
 		if err == gorm.ErrRecordNotFound {
 			config := AppConfig{
 				Key:   key,

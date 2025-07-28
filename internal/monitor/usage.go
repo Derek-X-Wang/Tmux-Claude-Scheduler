@@ -7,13 +7,17 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 
+	"github.com/derekxwang/tcs/internal/claude"
+	"github.com/derekxwang/tcs/internal/config"
 	"github.com/derekxwang/tcs/internal/database"
 )
 
 // UsageMonitor tracks Claude subscription usage across 5-hour windows
 type UsageMonitor struct {
 	db              *gorm.DB
+	claudeReader    *claude.ClaudeDataReader
 	mu              sync.RWMutex
 	currentWindow   *database.UsageWindow
 	lastWindowCheck time.Time
@@ -42,6 +46,7 @@ type UsageStats struct {
 func NewUsageMonitor(db *gorm.DB) *UsageMonitor {
 	return &UsageMonitor{
 		db:              db,
+		claudeReader:    claude.NewClaudeDataReader(),
 		lastWindowCheck: time.Now(),
 		maxMessages:     1000,   // Default limit, should be configurable
 		maxTokens:       100000, // Default limit, should be configurable
@@ -64,21 +69,103 @@ func (um *UsageMonitor) Initialize() error {
 	return nil
 }
 
-// loadCurrentWindow loads the current active usage window or creates a new one
+// loadCurrentWindow loads the current active usage window based on Claude's reset schedule
 func (um *UsageMonitor) loadCurrentWindow() error {
-	// Try to find current active window
+	// Get configuration for reset hour
+	cfg := config.Get()
+	resetHour := 11 // default
+	if cfg != nil {
+		resetHour = cfg.Usage.ClaudeResetHour
+	}
+
+	// Get actual Claude usage data for current window
+	_, windowStart, windowEnd, err := um.claudeReader.GetCurrentWindowEntries(resetHour)
+	if err != nil {
+		log.Printf("Warning: Could not read Claude data: %v", err)
+		// Fallback to database window if Claude data unavailable
+		return um.loadCurrentWindowFromDB()
+	}
+
+	// Try to find existing window that matches current time period
+	var window database.UsageWindow
+	// Use Session to silence "record not found" log for this query
+	err = um.db.Session(&gorm.Session{Logger: um.db.Logger.LogMode(logger.Silent)}).
+		Where("start_time = ? AND end_time = ?", windowStart, windowEnd).First(&window).Error
+
+	if err == gorm.ErrRecordNotFound {
+		// Create new window based on Claude's schedule
+		return um.createClaudeBasedWindow(windowStart, windowEnd, resetHour)
+	} else if err != nil {
+		return fmt.Errorf("error querying current window: %w", err)
+	}
+
+	// Update window as active and deactivate others
+	if err := um.db.Model(&database.UsageWindow{}).Where("id != ?", window.ID).Update("active", false).Error; err != nil {
+		log.Printf("Warning: failed to deactivate old windows: %v", err)
+	}
+	window.Active = true
+	if err := um.db.Save(&window).Error; err != nil {
+		log.Printf("Warning: failed to activate current window: %v", err)
+	}
+
+	um.currentWindow = &window
+	return nil
+}
+
+// loadCurrentWindowFromDB is a fallback when Claude data is not available
+func (um *UsageMonitor) loadCurrentWindowFromDB() error {
 	var window database.UsageWindow
 	err := um.db.Where("active = ? AND start_time <= ? AND end_time >= ?",
 		true, time.Now(), time.Now()).First(&window).Error
 
 	if err == gorm.ErrRecordNotFound {
-		// No active window found, create a new one
 		return um.createNewWindow()
 	} else if err != nil {
 		return fmt.Errorf("error querying current window: %w", err)
 	}
 
 	um.currentWindow = &window
+	return nil
+}
+
+// createClaudeBasedWindow creates a new window based on Claude's actual schedule
+func (um *UsageMonitor) createClaudeBasedWindow(windowStart, windowEnd time.Time, resetHour int) error {
+	// Deactivate any existing windows
+	if err := um.db.Model(&database.UsageWindow{}).
+		Where("active = ?", true).
+		Update("active", false).Error; err != nil {
+		return fmt.Errorf("failed to deactivate old windows: %w", err)
+	}
+
+	// Get actual message count from Claude data
+	messageCount, _, _, err := um.claudeReader.CountMessagesInWindow(resetHour)
+	if err != nil {
+		log.Printf("Warning: Could not get message count from Claude data: %v", err)
+		messageCount = 0 // Fallback to 0
+	}
+
+	// Create new window with actual Claude data
+	window := &database.UsageWindow{
+		StartTime:     windowStart,
+		EndTime:       windowEnd,
+		TotalMessages: messageCount,
+		TotalTokens:   0, // Token counting could be added later
+		Active:        true,
+	}
+
+	if err := um.db.Create(window).Error; err != nil {
+		return fmt.Errorf("failed to create new window: %w", err)
+	}
+
+	um.currentWindow = window
+	log.Printf("Created Claude-based usage window: %v to %v with %d messages",
+		window.StartTime.Format("15:04"), window.EndTime.Format("15:04"), messageCount)
+
+	// Notify callbacks about new window
+	for _, callback := range um.windowCallbacks {
+		go callback(window)
+	}
+
 	return nil
 }
 
@@ -114,7 +201,7 @@ func (um *UsageMonitor) createNewWindow() error {
 	return nil
 }
 
-// GetCurrentStats returns current usage statistics
+// GetCurrentStats returns current usage statistics using real Claude data
 func (um *UsageMonitor) GetCurrentStats() (*UsageStats, error) {
 	um.mu.Lock()
 	defer um.mu.Unlock()
@@ -123,10 +210,47 @@ func (um *UsageMonitor) GetCurrentStats() (*UsageStats, error) {
 		return nil, fmt.Errorf("no current window available")
 	}
 
-	// Check if window has expired
-	if um.currentWindow.IsExpired() {
-		if err := um.createNewWindow(); err != nil {
-			return nil, fmt.Errorf("failed to create new window: %w", err)
+	// Get configuration for reset hour
+	cfg := config.Get()
+	resetHour := 11 // default
+	if cfg != nil {
+		resetHour = cfg.Usage.ClaudeResetHour
+		um.maxMessages = cfg.Usage.MaxMessages
+	}
+
+	// Get real Claude usage data for current window
+	var actualMessageCount int
+	var windowStart, windowEnd time.Time
+
+	messageCount, start, end, err := um.claudeReader.CountMessagesInWindow(resetHour)
+	if err != nil {
+		log.Printf("Warning: Could not get real-time Claude data: %v", err)
+		// Fallback to database values
+		actualMessageCount = um.currentWindow.TotalMessages
+		windowStart = um.currentWindow.StartTime
+		windowEnd = um.currentWindow.EndTime
+	} else {
+		actualMessageCount = messageCount
+		windowStart = start
+		windowEnd = end
+
+		// Update database with real data if significantly different
+		if abs(actualMessageCount-um.currentWindow.TotalMessages) > 0 {
+			um.currentWindow.TotalMessages = actualMessageCount
+			um.currentWindow.StartTime = windowStart
+			um.currentWindow.EndTime = windowEnd
+			if err := um.db.Save(um.currentWindow).Error; err != nil {
+				log.Printf("Warning: failed to update window with real data: %v", err)
+			}
+		}
+	}
+
+	// Check if window has expired (based on real Claude schedule)
+	now := time.Now()
+	if now.After(windowEnd) {
+		// Window expired, load new one
+		if err := um.loadCurrentWindow(); err != nil {
+			log.Printf("Warning: failed to load new window: %v", err)
 		}
 	}
 
@@ -137,37 +261,50 @@ func (um *UsageMonitor) GetCurrentStats() (*UsageStats, error) {
 	// Calculate usage percentage based on messages (primary metric)
 	usagePercentage := 0.0
 	if um.maxMessages > 0 {
-		usagePercentage = float64(um.currentWindow.TotalMessages) / float64(um.maxMessages)
+		usagePercentage = float64(actualMessageCount) / float64(um.maxMessages)
 	}
 
 	// Get last activity from windows
 	var lastActivity *time.Time
 	var latestWindow database.TmuxWindow
-	err := um.db.Where("active = ? AND has_claude = ?", true, true).
+	// Use Session to silence "record not found" log for this query
+	err = um.db.Session(&gorm.Session{Logger: um.db.Logger.LogMode(logger.Silent)}).
+		Where("active = ? AND has_claude = ?", true, true).
 		Order("last_activity DESC").
 		First(&latestWindow).Error
 	if err == nil && latestWindow.LastActivity != nil {
 		lastActivity = latestWindow.LastActivity
 	}
 
-	// Estimate next reset time (5 hours from current window start)
-	estimatedReset := um.currentWindow.EndTime
+	// Calculate time remaining until next reset
+	timeRemaining := time.Until(windowEnd)
+	if timeRemaining < 0 {
+		timeRemaining = 0
+	}
 
 	stats := &UsageStats{
 		CurrentWindow:   um.currentWindow,
-		MessagesUsed:    um.currentWindow.TotalMessages,
+		MessagesUsed:    actualMessageCount,
 		TokensUsed:      um.currentWindow.TotalTokens,
 		WindowsActive:   int(activeWindows),
-		TimeRemaining:   um.currentWindow.TimeRemaining(),
+		TimeRemaining:   timeRemaining,
 		UsagePercentage: usagePercentage,
-		CanSendMessage:  um.currentWindow.TotalMessages < um.maxMessages,
-		WindowStartTime: um.currentWindow.StartTime,
-		WindowEndTime:   um.currentWindow.EndTime,
+		CanSendMessage:  actualMessageCount < um.maxMessages,
+		WindowStartTime: windowStart,
+		WindowEndTime:   windowEnd,
 		LastActivity:    lastActivity,
-		EstimatedReset:  estimatedReset,
+		EstimatedReset:  windowEnd,
 	}
 
 	return stats, nil
+}
+
+// abs returns the absolute value of an integer
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 // RecordMessageSent records that a message was sent in the current window

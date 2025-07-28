@@ -414,6 +414,11 @@ func Run() error {
 		return fmt.Errorf("failed to initialize scheduler: %w", err)
 	}
 
+	// Start the scheduler to process messages
+	if err := schedulerInstance.Start(); err != nil {
+		return fmt.Errorf("failed to start scheduler: %w", err)
+	}
+
 	// Create and run TUI app
 	app := NewApp(database.GetDB(), tmuxClient, usageMonitor, windowDiscovery, schedulerInstance)
 
