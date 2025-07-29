@@ -526,9 +526,7 @@ func (s *Scheduler) refreshMessages() {
 		SentTime      *time.Time
 		CreatedAt     time.Time
 		Error         string
-		Window        struct {
-			Target string
-		}
+		WindowTarget  string
 	}
 
 	// Query messages with window information
@@ -550,7 +548,7 @@ func (s *Scheduler) refreshMessages() {
 
 		s.messages[i] = types.MessageDisplayInfo{
 			ID:            msg.ID,
-			SessionName:   msg.Window.Target,
+			SessionName:   msg.WindowTarget,
 			Content:       msg.Content,
 			Priority:      msg.Priority,
 			Status:        msg.Status,
@@ -578,7 +576,7 @@ func (s *Scheduler) refreshMessages() {
 
 		rows = append(rows, table.Row{
 			strconv.Itoa(int(msg.ID)),
-			msg.Window.Target,
+			msg.WindowTarget,
 			displayContent,
 			strconv.Itoa(msg.Priority),
 			msg.Status,

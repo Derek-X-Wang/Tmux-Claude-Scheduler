@@ -456,16 +456,10 @@ func (w *Windows) scanWindows() tea.Cmd {
 			}
 		}
 
-		// Refresh data after scan
-		go func() {
-			time.Sleep(500 * time.Millisecond)
-			w.refreshWindows()
-			w.refreshQueues()
-		}()
-
+		// Return success message - the refresh will happen via the regular Update cycle
 		return types.SuccessMsg{
 			Title:   "Window Scan",
-			Message: "Scanning for new windows...",
+			Message: "Window scan completed. Data will refresh automatically.",
 		}
 	})
 }
@@ -518,16 +512,9 @@ func (w *Windows) forceRescan() tea.Cmd {
 			}
 		}
 
-		// Refresh data
-		go func() {
-			time.Sleep(200 * time.Millisecond)
-			w.refreshWindows()
-			w.refreshQueues()
-		}()
-
 		return types.SuccessMsg{
 			Title: "Force Rescan Complete",
-			Message: fmt.Sprintf("Found %d windows (%d with Claude) across %d sessions",
+			Message: fmt.Sprintf("Found %d windows (%d with Claude) across %d sessions. Data will refresh automatically.",
 				windowCount, claudeCount, len(sessions)),
 		}
 	})

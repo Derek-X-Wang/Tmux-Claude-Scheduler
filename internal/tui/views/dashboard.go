@@ -332,9 +332,9 @@ func (d *Dashboard) updateSchedulerStats() {
 	// Get message counts from database
 	if d.db != nil {
 		var pending, sent, failed int64
-		d.db.Model(&types.MessageDisplayInfo{}).Where("status = ?", "pending").Count(&pending)
-		d.db.Model(&types.MessageDisplayInfo{}).Where("status = ?", "sent").Count(&sent)
-		d.db.Model(&types.MessageDisplayInfo{}).Where("status = ?", "failed").Count(&failed)
+		d.db.Model(&database.Message{}).Where("status = ?", "pending").Count(&pending)
+		d.db.Model(&database.Message{}).Where("status = ?", "sent").Count(&sent)
+		d.db.Model(&database.Message{}).Where("status = ?", "failed").Count(&failed)
 
 		d.state.Scheduler.PendingMessages = int(pending)
 		d.state.Scheduler.SentMessages = int(sent)

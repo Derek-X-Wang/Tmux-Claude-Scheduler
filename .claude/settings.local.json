@@ -50,7 +50,8 @@
       "Bash(go:*)",
       "Bash(awk:*)",
       "Bash(~/go/bin/goimports -w internal/ cmd/ tests/ main.go)",
-      "Bash(./bin/tcs:*)"
+      "Bash(./bin/tcs:*)",
+      "Bash(sqlite3:*)"
     ],
     "deny": []
   }
