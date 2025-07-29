@@ -40,6 +40,14 @@ func NewClaudeDataReader() *ClaudeDataReader {
 
 // ReadUsageEntries reads and parses Claude usage entries from JSONL files
 func (r *ClaudeDataReader) ReadUsageEntries(hoursBack int) ([]UsageEntry, error) {
+	// Validate hoursBack parameter
+	if hoursBack < 0 {
+		return nil, fmt.Errorf("hoursBack must be non-negative, got %d", hoursBack)
+	}
+	if hoursBack > 8760 { // More than a year seems unreasonable
+		return nil, fmt.Errorf("hoursBack too large, maximum is 8760 hours (1 year), got %d", hoursBack)
+	}
+
 	if r.claudeDir == "" {
 		return nil, fmt.Errorf("claude directory not available")
 	}

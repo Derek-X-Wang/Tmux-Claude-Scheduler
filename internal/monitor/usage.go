@@ -26,7 +26,7 @@ type UsageMonitor struct {
 	windowCallbacks []func(*database.UsageWindow)
 	maxMessages     int // Maximum messages per 5-hour window
 	maxTokens       int // Maximum tokens per 5-hour window (if available)
-	
+
 	// Prevent concurrent GetCurrentStats calls
 	statsInProgress atomic.Bool
 	cachedStats     *UsageStats
@@ -216,7 +216,7 @@ func (um *UsageMonitor) GetCurrentStats() (*UsageStats, error) {
 		cached := um.cachedStats
 		cacheAge := time.Since(um.cacheTime)
 		um.mu.RUnlock()
-		
+
 		if cached != nil && cacheAge < 2*time.Second {
 			return cached, nil
 		}
@@ -224,7 +224,7 @@ func (um *UsageMonitor) GetCurrentStats() (*UsageStats, error) {
 		return nil, fmt.Errorf("stats calculation in progress")
 	}
 	defer um.statsInProgress.Store(false)
-	
+
 	// Lock and calculate stats
 	um.mu.Lock()
 	defer um.mu.Unlock()
@@ -288,14 +288,14 @@ func (um *UsageMonitor) GetCurrentStats() (*UsageStats, error) {
 
 	// Get last activity from windows
 	var lastActivity *time.Time
-	var latestWindow database.TmuxWindow
-	// Use Session to silence "record not found" log for this query
-	err = um.db.Session(&gorm.Session{Logger: um.db.Logger.LogMode(logger.Silent)}).
-		Where("active = ? AND has_claude = ?", true, true).
+	var windows []database.TmuxWindow
+	// Use Limit(1).Find() to avoid "record not found" logs when no records exist
+	err = um.db.Where("active = ? AND has_claude = ?", true, true).
 		Order("last_activity DESC").
-		First(&latestWindow).Error
-	if err == nil && latestWindow.LastActivity != nil {
-		lastActivity = latestWindow.LastActivity
+		Limit(1).
+		Find(&windows).Error
+	if err == nil && len(windows) > 0 && windows[0].LastActivity != nil {
+		lastActivity = windows[0].LastActivity
 	}
 
 	// Calculate time remaining until next reset

@@ -104,7 +104,7 @@ func Load(configPath string) (*Config, error) {
 	v.AddConfigPath(".")
 
 	// Environment variable configuration
-	v.SetEnvPrefix("CUM")
+	v.SetEnvPrefix("TCS")
 	v.AutomaticEnv()
 
 	// Set defaults

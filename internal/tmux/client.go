@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/derekxwang/tcs/internal/utils"
 )
 
 // Client provides tmux functionality using shell commands
@@ -259,34 +261,7 @@ func (c *Client) DiscoverClaudeSessions() ([]WindowInfo, error) {
 
 // isClaudeWindow checks if window content indicates a Claude session
 func (c *Client) isClaudeWindow(content string) bool {
-	claudeIndicators := []string{
-		"claude",
-		"Claude",
-		"anthropic",
-		"Assistant:",
-		"Human:",
-		"I'm Claude",
-		"claude-3",
-		"I'm an AI assistant",
-		"Claude Code",
-		"claude-code",
-		"claude code",
-		"$ claude",
-		"> claude",
-		"# claude",
-		"Sonnet",
-		"claude-sonnet",
-		"model named",
-	}
-
-	contentLower := strings.ToLower(content)
-	for _, indicator := range claudeIndicators {
-		if strings.Contains(contentLower, strings.ToLower(indicator)) {
-			return true
-		}
-	}
-
-	return false
+	return utils.IsClaudeWindow(content)
 }
 
 // MonitorWindow monitors a window for changes and returns a channel of updates

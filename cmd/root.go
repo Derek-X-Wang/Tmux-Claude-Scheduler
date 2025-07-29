@@ -930,7 +930,10 @@ func runMessageEdit(messageIDStr, content, target string, priority int, when str
 		updates["content"] = content
 	}
 
-	if priority >= 1 && priority <= 10 {
+	if priority != 0 { // 0 means not specified (default flag value)
+		if priority < 1 || priority > 10 {
+			return fmt.Errorf("priority must be between 1 and 10, got %d", priority)
+		}
 		updates["priority"] = priority
 	}
 

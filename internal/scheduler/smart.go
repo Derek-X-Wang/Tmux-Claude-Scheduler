@@ -199,9 +199,17 @@ func (ss *SmartScheduler) processNextMessage() {
 	popped := heap.Pop(ss.queue)
 	item, ok := popped.(*MessageQueueItem)
 	if !ok {
-		log.Printf("Error: invalid type from heap.Pop, expected *MessageQueueItem")
+		log.Printf("Error: invalid type from heap.Pop, expected *MessageQueueItem, got %T", popped)
+		// Clear the heap to prevent further corruption
+		ss.queue = &MessageQueue{}
 		return
 	}
+
+	if item == nil {
+		log.Printf("Error: received nil MessageQueueItem from heap")
+		return
+	}
+
 	message := item.Message
 
 	// Check if message is ready to be sent

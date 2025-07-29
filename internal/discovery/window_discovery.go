@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"strings"
 	"sync"
 	"time"
 
@@ -13,6 +12,7 @@ import (
 	"github.com/derekxwang/tcs/internal/config"
 	"github.com/derekxwang/tcs/internal/database"
 	"github.com/derekxwang/tcs/internal/tmux"
+	"github.com/derekxwang/tcs/internal/utils"
 )
 
 // WindowDiscovery manages automatic discovery and tracking of tmux windows
@@ -332,34 +332,7 @@ func (wd *WindowDiscovery) cleanupInactiveWindows() {
 
 // isClaudeWindow checks if window content indicates a Claude session
 func (wd *WindowDiscovery) isClaudeWindow(content string) bool {
-	claudeIndicators := []string{
-		"claude",
-		"Claude",
-		"anthropic",
-		"Assistant:",
-		"Human:",
-		"I'm Claude",
-		"claude-3",
-		"I'm an AI assistant",
-		"Claude Code",
-		"claude-code",
-		"claude code",
-		"$ claude",
-		"> claude",
-		"# claude",
-		"Sonnet",
-		"claude-sonnet",
-		"model named",
-	}
-
-	contentLower := strings.ToLower(content)
-	for _, indicator := range claudeIndicators {
-		if strings.Contains(contentLower, strings.ToLower(indicator)) {
-			return true
-		}
-	}
-
-	return false
+	return utils.IsClaudeWindow(content)
 }
 
 // countTotalWindows counts total windows across all sessions

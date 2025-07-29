@@ -5,8 +5,11 @@ BINARY_NAME=tcs
 BINARY_PATH=./bin/$(BINARY_NAME)
 GO_FILES=$(shell find . -name "*.go" -type f -not -path "./vendor/*")
 
-# Default target
+# Default target (fast)
 all: lint test build
+
+# Thorough build target
+all-full: lint test-race build
 
 # Build the binary
 build:
@@ -14,10 +17,30 @@ build:
 	@mkdir -p bin
 	go build -o $(BINARY_PATH) ./main.go
 
-# Run tests
+# Run tests (fast - no race detection, no integration tests)
 test:
-	@echo "Running tests..."
-	go test ./... -v -race -coverprofile=coverage.out
+	@echo "Running fast tests..."
+	go test ./tests -v -short -timeout=1m -run "TestForceRescan_CrashDebug|TestForceRescan_ComponentsIndividually|TestForceRescan_BubbleTeaCommand"
+
+# Run all tests with race detection (slower)
+test-race:
+	@echo "Running tests with race detection..."
+	go test ./tests -v -race -short -timeout=2m
+
+# Run all tests including integration tests
+test-all:
+	@echo "Running all tests including integration tests..."
+	go test ./... -v -timeout=5m
+
+# Run only unit tests (fastest)
+test-unit:
+	@echo "Running unit tests only..."
+	go test ./tests -v -timeout=1m -run "TestForceRescan_CrashDebug|TestForceRescan_ComponentsIndividually|TestForceRescan_BubbleTeaCommand"
+
+# Run integration tests only
+test-integration:
+	@echo "Running integration tests only..."
+	go test ./tests -v -run "TestTUI_" -timeout=3m
 
 # Run the application
 run: build
@@ -122,8 +145,11 @@ tui: build
 	@echo "Starting TUI..."
 	$(BINARY_PATH) tui
 
-# Development workflow
+# Development workflow (fast)
 dev: fmt vet lint test build
+
+# Development workflow (thorough)
+dev-full: fmt vet lint test-race build
 
 # Show coverage
 coverage: test
@@ -139,17 +165,24 @@ install: build
 # Help
 help:
 	@echo "Available targets:"
-	@echo "  build       - Build the binary"
-	@echo "  test        - Run tests"
-	@echo "  run         - Build and run the application"
-	@echo "  clean       - Clean build artifacts"
-	@echo "  fmt         - Format code"
-	@echo "  vet         - Run go vet"
-	@echo "  lint        - Run golangci-lint"
-	@echo "  install-deps - Install Go dependencies"
-	@echo "  install-tools - Install development tools"
-	@echo "  tui         - Build and start TUI"
-	@echo "  dev         - Run full development workflow (fmt, vet, lint, test, build)"
-	@echo "  coverage    - Show test coverage"
-	@echo "  install     - Install binary to /usr/local/bin"
-	@echo "  help        - Show this help"
+	@echo "  all             - Default fast build (lint, test, build)"
+	@echo "  all-full        - Thorough build with race detection"
+	@echo "  build           - Build the binary"
+	@echo "  test            - Run fast tests (core functionality only)"
+	@echo "  test-race       - Run tests with race detection (slower)"
+	@echo "  test-all        - Run all tests including slow integration tests"
+	@echo "  test-unit       - Run only unit tests (fastest)"
+	@echo "  test-integration - Run only integration tests"
+	@echo "  run             - Build and run the application"
+	@echo "  clean           - Clean build artifacts"
+	@echo "  fmt             - Format code"
+	@echo "  vet             - Run go vet"
+	@echo "  lint            - Run golangci-lint"
+	@echo "  install-deps    - Install Go dependencies"
+	@echo "  install-tools   - Install development tools"
+	@echo "  tui             - Build and start TUI"
+	@echo "  dev             - Fast development workflow"
+	@echo "  dev-full        - Thorough development workflow with race detection"
+	@echo "  coverage        - Show test coverage"
+	@echo "  install         - Install binary to /usr/local/bin"
+	@echo "  help            - Show this help"

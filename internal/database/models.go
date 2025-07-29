@@ -2,6 +2,7 @@ package database
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"gorm.io/gorm"
@@ -227,13 +228,50 @@ func GetTmuxWindow(db *gorm.DB, target string) (*TmuxWindow, error) {
 	return &window, nil
 }
 
+// Cache for GetActiveTmuxWindows to reduce database queries
+var (
+	activeTmuxWindowsCache      []TmuxWindow
+	activeTmuxWindowsCacheTime  time.Time
+	activeTmuxWindowsCacheMutex sync.RWMutex
+)
+
 // GetActiveTmuxWindows returns all active tmux windows with Claude
 func GetActiveTmuxWindows(db *gorm.DB) ([]TmuxWindow, error) {
+	// Check cache first (valid for 2 seconds)
+	activeTmuxWindowsCacheMutex.RLock()
+	if time.Since(activeTmuxWindowsCacheTime) < 2*time.Second && activeTmuxWindowsCache != nil {
+		// Return cached copy
+		cached := make([]TmuxWindow, len(activeTmuxWindowsCache))
+		copy(cached, activeTmuxWindowsCache)
+		activeTmuxWindowsCacheMutex.RUnlock()
+		return cached, nil
+	}
+	activeTmuxWindowsCacheMutex.RUnlock()
+
+	// Cache miss or expired, query database
 	var windows []TmuxWindow
 	err := db.Where("active = ? AND has_claude = ?", true, true).
 		Order("priority DESC, session_name ASC, window_index ASC").
 		Find(&windows).Error
+
+	if err == nil {
+		// Update cache
+		activeTmuxWindowsCacheMutex.Lock()
+		activeTmuxWindowsCache = make([]TmuxWindow, len(windows))
+		copy(activeTmuxWindowsCache, windows)
+		activeTmuxWindowsCacheTime = time.Now()
+		activeTmuxWindowsCacheMutex.Unlock()
+	}
+
 	return windows, err
+}
+
+// InvalidateActiveTmuxWindowsCache invalidates the cache when windows are modified
+func InvalidateActiveTmuxWindowsCache() {
+	activeTmuxWindowsCacheMutex.Lock()
+	activeTmuxWindowsCache = nil
+	activeTmuxWindowsCacheTime = time.Time{}
+	activeTmuxWindowsCacheMutex.Unlock()
 }
 
 // CreateOrUpdateTmuxWindow creates or updates a tmux window entry
@@ -261,6 +299,8 @@ func CreateOrUpdateTmuxWindow(db *gorm.DB, sessionName string, windowIndex int, 
 			if err := db.Create(&window).Error; err != nil {
 				return nil, err
 			}
+			// Invalidate cache since we added a new window
+			InvalidateActiveTmuxWindowsCache()
 		} else {
 			return nil, err
 		}
@@ -274,6 +314,8 @@ func CreateOrUpdateTmuxWindow(db *gorm.DB, sessionName string, windowIndex int, 
 		if err := db.Model(&window).Updates(updates).Error; err != nil {
 			return nil, err
 		}
+		// Invalidate cache since we updated the window
+		InvalidateActiveTmuxWindowsCache()
 	}
 
 	return &window, nil
