@@ -15,6 +15,7 @@ import (
 	"github.com/derekxwang/tcs/internal/scheduler"
 	"github.com/derekxwang/tcs/internal/tmux"
 	"github.com/derekxwang/tcs/internal/tui"
+	"github.com/derekxwang/tcs/internal/utils"
 )
 
 var (
@@ -398,7 +399,7 @@ func runWindowScan() error {
 				// Content-based detection only
 				content, err := tmuxClient.CapturePane(window.Target, 50)
 				if err == nil {
-					hasClaude = isClaudeWindow(content)
+					hasClaude = utils.IsClaudeWindow(content)
 				}
 			case "both":
 				fallthrough
@@ -411,7 +412,7 @@ func runWindowScan() error {
 					// Fallback to content-based detection
 					content, err := tmuxClient.CapturePane(window.Target, 50)
 					if err == nil {
-						hasClaude = isClaudeWindow(content)
+						hasClaude = utils.IsClaudeWindow(content)
 					}
 				}
 			}
@@ -577,32 +578,30 @@ func runQueueStatus(sessionName string) error {
 }
 
 func runMessageAdd(target, content string, priority int, when string) error {
-	// Parse schedule time
-	var scheduledTime time.Time
-	var err error
+	// Validate target format (session:window)
+	if target == "" {
+		return fmt.Errorf("target cannot be empty")
+	}
+	if !strings.Contains(target, ":") {
+		return fmt.Errorf("target must be in format 'session:window' (e.g., 'project:0'), got: %s", target)
+	}
+	parts := strings.SplitN(target, ":", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return fmt.Errorf("invalid target format '%s'. Use 'session:window' (e.g., 'project:0')", target)
+	}
 
-	switch when {
-	case "now":
-		scheduledTime = time.Now()
-	default:
-		// Try to parse as duration (e.g., "+5m")
-		if when[0] == '+' {
-			duration, err := time.ParseDuration(when[1:])
-			if err != nil {
-				return fmt.Errorf("invalid duration format: %s", when)
-			}
-			scheduledTime = time.Now().Add(duration)
-		} else {
-			// Try to parse as time (e.g., "14:30")
-			scheduledTime, err = time.Parse("15:04", when)
-			if err != nil {
-				return fmt.Errorf("invalid time format: %s (use HH:MM or +duration)", when)
-			}
-			// If time is in the past, schedule for tomorrow
-			if scheduledTime.Before(time.Now()) {
-				scheduledTime = scheduledTime.AddDate(0, 0, 1)
-			}
-		}
+	// Validate content length (reasonable limit for CLI usage)
+	if len(content) == 0 {
+		return fmt.Errorf("message content cannot be empty")
+	}
+	if len(content) > 100000 { // 100KB limit
+		return fmt.Errorf("message content too long (%d characters, max 100,000)", len(content))
+	}
+
+	// Parse schedule time with comprehensive validation
+	scheduledTime, err := parseScheduleTime(when)
+	if err != nil {
+		return fmt.Errorf("invalid schedule time: %w", err)
 	}
 
 	// Initialize components
@@ -938,27 +937,9 @@ func runMessageEdit(messageIDStr, content, target string, priority int, when str
 	}
 
 	if when != "" {
-		var scheduledTime time.Time
-		switch when {
-		case "now":
-			scheduledTime = time.Now()
-		default:
-			// Parse time (reuse logic from runMessageAdd)
-			if when[0] == '+' {
-				duration, err := time.ParseDuration(when[1:])
-				if err != nil {
-					return fmt.Errorf("invalid duration format: %s", when)
-				}
-				scheduledTime = time.Now().Add(duration)
-			} else {
-				scheduledTime, err = time.Parse("15:04", when)
-				if err != nil {
-					return fmt.Errorf("invalid time format: %s", when)
-				}
-				if scheduledTime.Before(time.Now()) {
-					scheduledTime = scheduledTime.AddDate(0, 0, 1)
-				}
-			}
+		scheduledTime, err := parseScheduleTime(when)
+		if err != nil {
+			return fmt.Errorf("invalid schedule time: %w", err)
 		}
 		updates["scheduled_time"] = scheduledTime
 	}
@@ -1021,20 +1002,72 @@ func runMessageDelete(messageIDStr string) error {
 	return nil
 }
 
-// Helper functions
-func isClaudeWindow(content string) bool {
-	claudeIndicators := []string{
-		"claude", "Claude", "anthropic", "Assistant:", "Human:",
-		"I'm Claude", "claude-3", "I'm an AI assistant", "Claude Code", "claude-code",
+// Helper functions (using optimized detection from utils package)
+
+// parseScheduleTime parses time input with comprehensive validation
+// Supports: "now", "+duration", "HH:MM", "YYYY-MM-DD HH:MM"
+func parseScheduleTime(when string) (time.Time, error) {
+	if when == "" {
+		return time.Time{}, fmt.Errorf("time cannot be empty")
 	}
 
-	contentLower := strings.ToLower(content)
-	for _, indicator := range claudeIndicators {
-		if strings.Contains(contentLower, strings.ToLower(indicator)) {
-			return true
+	switch when {
+	case "now":
+		return time.Now(), nil
+	default:
+		// Handle relative time (+duration)
+		if len(when) > 1 && when[0] == '+' {
+			duration, err := time.ParseDuration(when[1:])
+			if err != nil {
+				return time.Time{}, fmt.Errorf("invalid duration format '%s': %w (use formats like +1h, +30m, +5s)", when, err)
+			}
+
+			// Validate reasonable duration limits
+			if duration < 0 {
+				return time.Time{}, fmt.Errorf("duration cannot be negative: %s", when)
+			}
+			if duration > 30*24*time.Hour { // 30 days
+				return time.Time{}, fmt.Errorf("duration too large (max 30 days): %s", when)
+			}
+
+			return time.Now().Add(duration), nil
 		}
+
+		// Try parsing as time in different formats
+		now := time.Now()
+
+		// Try HH:MM format first (most common)
+		if t, err := time.Parse("15:04", when); err == nil {
+			// Combine with today's date
+			scheduledTime := time.Date(now.Year(), now.Month(), now.Day(),
+				t.Hour(), t.Minute(), 0, 0, now.Location())
+
+			// If time is in the past, schedule for tomorrow
+			if scheduledTime.Before(now) {
+				scheduledTime = scheduledTime.AddDate(0, 0, 1)
+			}
+			return scheduledTime, nil
+		}
+
+		// Try full datetime format: YYYY-MM-DD HH:MM
+		if t, err := time.Parse("2006-01-02 15:04", when); err == nil {
+			if t.Before(now) {
+				return time.Time{}, fmt.Errorf("scheduled time cannot be in the past: %s", when)
+			}
+			return t, nil
+		}
+
+		// Try date only format: YYYY-MM-DD (schedule for 9 AM)
+		if t, err := time.Parse("2006-01-02", when); err == nil {
+			scheduledTime := time.Date(t.Year(), t.Month(), t.Day(), 9, 0, 0, 0, now.Location())
+			if scheduledTime.Before(now) {
+				return time.Time{}, fmt.Errorf("scheduled date cannot be in the past: %s", when)
+			}
+			return scheduledTime, nil
+		}
+
+		return time.Time{}, fmt.Errorf("invalid time format '%s'. Supported formats: 'now', '+duration', 'HH:MM', 'YYYY-MM-DD HH:MM', 'YYYY-MM-DD'", when)
 	}
-	return false
 }
 
 func truncateString(s string, maxLen int) string {
@@ -1152,7 +1185,7 @@ func runInit() error {
 			hasClaude := false
 			content, err := tmuxClient.CapturePane(window.Target, 50)
 			if err == nil {
-				hasClaude = isClaudeWindow(content)
+				hasClaude = utils.IsClaudeWindow(content)
 			}
 
 			// Create or update window

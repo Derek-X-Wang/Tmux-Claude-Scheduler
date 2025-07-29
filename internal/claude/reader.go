@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/derekxwang/tcs/internal/config"
 )
 
 // UsageEntry represents a Claude usage entry from JSONL data
@@ -172,6 +174,25 @@ func (r *ClaudeDataReader) findJSONLFiles() ([]string, error) {
 
 // processJSONLFile processes a single JSONL file
 func (r *ClaudeDataReader) processJSONLFile(filePath string, cutoffTime *time.Time, processedIDs map[string]bool) ([]UsageEntry, error) {
+	// Check file size before processing
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get file info for %s: %w", filePath, err)
+	}
+
+	// Get max file size from config (default 50MB)
+	cfg := config.Get()
+	maxFileSize := int64(52428800) // 50MB default
+	if cfg != nil && cfg.Claude.MaxFileSize > 0 {
+		maxFileSize = cfg.Claude.MaxFileSize
+	}
+
+	if fileInfo.Size() > maxFileSize {
+		log.Printf("Warning: Skipping file %s (size: %d bytes) as it exceeds maximum size limit (%d bytes)",
+			filePath, fileInfo.Size(), maxFileSize)
+		return nil, nil // Return empty results, not an error
+	}
+
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, err

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"gorm.io/gorm"
@@ -27,8 +26,8 @@ type UsageMonitor struct {
 	maxMessages     int // Maximum messages per 5-hour window
 	maxTokens       int // Maximum tokens per 5-hour window (if available)
 
-	// Prevent concurrent GetCurrentStats calls
-	statsInProgress atomic.Bool
+	// Stats calculation state (protected by mu)
+	statsInProgress bool
 	cachedStats     *UsageStats
 	cacheTime       time.Time
 }
@@ -209,25 +208,23 @@ func (um *UsageMonitor) createNewWindow() error {
 
 // GetCurrentStats returns current usage statistics using real Claude data
 func (um *UsageMonitor) GetCurrentStats() (*UsageStats, error) {
-	// Try to set busy flag - if already in progress, return cached stats
-	if !um.statsInProgress.CompareAndSwap(false, true) {
-		// Already in progress, return cached stats if fresh enough
-		um.mu.RLock()
-		cached := um.cachedStats
-		cacheAge := time.Since(um.cacheTime)
-		um.mu.RUnlock()
-
-		if cached != nil && cacheAge < 2*time.Second {
-			return cached, nil
-		}
-		// Cache too old, return error
-		return nil, fmt.Errorf("stats calculation in progress")
-	}
-	defer um.statsInProgress.Store(false)
-
-	// Lock and calculate stats
 	um.mu.Lock()
 	defer um.mu.Unlock()
+
+	// Check if calculation is already in progress and return cached stats if fresh
+	if um.statsInProgress {
+		if um.cachedStats != nil && time.Since(um.cacheTime) < 2*time.Second {
+			return um.cachedStats, nil
+		}
+		// Cache too old, return error to avoid blocking
+		return nil, fmt.Errorf("stats calculation in progress")
+	}
+
+	// Mark calculation as in progress
+	um.statsInProgress = true
+	defer func() {
+		um.statsInProgress = false
+	}()
 	if um.currentWindow == nil {
 		return nil, fmt.Errorf("no current window available")
 	}

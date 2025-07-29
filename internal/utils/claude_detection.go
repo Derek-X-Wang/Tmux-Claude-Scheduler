@@ -25,18 +25,51 @@ var claudeIndicators = []string{
 	"model named",
 }
 
+// Pre-computed lowercase indicators for performance
+var lowerClaudeIndicators []string
+
+// High-priority indicators for early exit optimization
+var priorityIndicators = []string{
+	"claude",
+	"anthropic",
+	"assistant:",
+	"human:",
+}
+
+func init() {
+	// Pre-compute lowercase versions of all indicators
+	lowerClaudeIndicators = make([]string, len(claudeIndicators))
+	for i, indicator := range claudeIndicators {
+		lowerClaudeIndicators[i] = strings.ToLower(indicator)
+	}
+}
+
 // IsClaudeWindow checks if window content indicates a Claude session
-// It performs case-insensitive matching for better detection accuracy
+// Optimized version with pre-computed patterns and early exit strategies
 func IsClaudeWindow(content string) bool {
 	if content == "" {
 		return false
 	}
 
-	// Convert to lowercase for case-insensitive matching
+	// Convert to lowercase once
 	lowerContent := strings.ToLower(content)
 
-	for _, indicator := range claudeIndicators {
-		if strings.Contains(lowerContent, strings.ToLower(indicator)) {
+	// First check high-priority indicators for early exit (most common patterns)
+	for _, indicator := range priorityIndicators {
+		if strings.Contains(lowerContent, indicator) {
+			return true
+		}
+	}
+
+	// Check remaining pre-computed lowercase indicators
+	for _, indicator := range lowerClaudeIndicators {
+		// Skip priority indicators we already checked
+		if indicator == "claude" || indicator == "anthropic" ||
+			indicator == "assistant:" || indicator == "human:" {
+			continue
+		}
+
+		if strings.Contains(lowerContent, indicator) {
 			return true
 		}
 	}

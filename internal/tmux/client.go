@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os/exec"
@@ -389,27 +390,65 @@ func (c *Client) DetectClaudeProcessWithNames(target string, processNames []stri
 }
 
 // isProcessRelatedToPane checks if a process is related to the tmux pane
+// Enhanced with cycle detection, timeout, and better error handling
 func (c *Client) isProcessRelatedToPane(processPID, panePID string) bool {
-	// On macOS, pstree might not be available, use a different approach
-	// Check if the process has our pane PID as an ancestor
+	if processPID == "" || panePID == "" {
+		return false
+	}
+
+	// Validate input PIDs are numeric
+	if _, err := strconv.Atoi(processPID); err != nil {
+		return false
+	}
+	if _, err := strconv.Atoi(panePID); err != nil {
+		return false
+	}
+
 	currentPID := processPID
+	visitedPIDs := make(map[string]bool) // Cycle detection
+
+	// Create a timeout context (5 seconds should be more than enough)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
 	// Walk up the process tree to find if panePID is an ancestor
-	for i := 0; i < 10; i++ { // Limit depth to avoid infinite loops
+	for i := 0; i < 50; i++ { // Increased limit but with cycle detection
+		// Check for timeout
+		select {
+		case <-ctx.Done():
+			log.Printf("Warning: Process tree traversal timed out for PID %s", processPID)
+			return false
+		default:
+		}
+
 		if currentPID == panePID {
 			return true
 		}
 
-		// Get parent PID
-		cmd := exec.Command("ps", "-o", "ppid=", "-p", currentPID)
+		// Check for cycles
+		if visitedPIDs[currentPID] {
+			log.Printf("Warning: Cycle detected in process tree at PID %s", currentPID)
+			return false
+		}
+		visitedPIDs[currentPID] = true
+
+		// Get parent PID with timeout
+		cmd := exec.CommandContext(ctx, "ps", "-o", "ppid=", "-p", currentPID)
 		output, err := cmd.Output()
 		if err != nil {
+			// Process might have died or we don't have permission
 			break
 		}
 
 		ppid := strings.TrimSpace(string(output))
-		if ppid == "" || ppid == "0" || ppid == "1" || ppid == currentPID {
-			break // Reached top of process tree or invalid PID
+		if ppid == "" || ppid == "0" || ppid == "1" {
+			break // Reached top of process tree
+		}
+
+		// Validate parent PID is numeric
+		if _, err := strconv.Atoi(ppid); err != nil {
+			log.Printf("Warning: Invalid parent PID format: %s", ppid)
+			break
 		}
 
 		currentPID = ppid

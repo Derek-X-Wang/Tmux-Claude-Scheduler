@@ -28,6 +28,9 @@ type Config struct {
 
 	// Tmux configuration
 	Tmux TmuxConfig `mapstructure:"tmux" json:"tmux"`
+
+	// Claude data processing configuration
+	Claude ClaudeConfig `mapstructure:"claude" json:"claude"`
 }
 
 // DatabaseConfig holds database configuration
@@ -79,6 +82,13 @@ type TmuxConfig struct {
 	MessageDelay          time.Duration `mapstructure:"message_delay" json:"message_delay"`
 	ClaudeDetectionMethod string        `mapstructure:"claude_detection_method" json:"claude_detection_method"` // "process", "text", or "both"
 	ClaudeProcessNames    []string      `mapstructure:"claude_process_names" json:"claude_process_names"`       // Process names to look for
+}
+
+// ClaudeConfig holds Claude data processing configuration
+type ClaudeConfig struct {
+	DataDirectory     string        `mapstructure:"data_directory" json:"data_directory"`         // Override default ~/.claude directory
+	MaxFileSize       int64         `mapstructure:"max_file_size" json:"max_file_size"`           // Maximum file size in bytes (default: 52428800 = 50MB)
+	ProcessingTimeout time.Duration `mapstructure:"processing_timeout" json:"processing_timeout"` // Timeout for processing files (default: 30s)
 }
 
 // global configuration instance
@@ -175,6 +185,11 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("tmux.message_delay", 500*time.Millisecond)
 	v.SetDefault("tmux.claude_detection_method", "both") // "process", "text", or "both"
 	v.SetDefault("tmux.claude_process_names", []string{"claude-code", "claude_code", "claude"})
+
+	// Claude data processing defaults
+	v.SetDefault("claude.data_directory", "")             // Empty means use default ~/.claude
+	v.SetDefault("claude.max_file_size", int64(52428800)) // 50MB in bytes
+	v.SetDefault("claude.processing_timeout", 30*time.Second)
 }
 
 // validateConfig validates the configuration
