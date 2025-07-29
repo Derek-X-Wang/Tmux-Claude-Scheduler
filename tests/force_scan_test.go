@@ -14,9 +14,8 @@ import (
 	"github.com/derekxwang/tcs/internal/types"
 )
 
-// TestTmuxClient wraps a real tmux client but overrides methods for testing
+// TestTmuxClient implements TmuxInterface for testing
 type TestTmuxClient struct {
-	*tmux.Client
 	isRunning    bool
 	sessions     []tmux.SessionInfo
 	sessionsErr  error
@@ -27,7 +26,6 @@ type TestTmuxClient struct {
 
 func NewTestTmuxClient() *TestTmuxClient {
 	return &TestTmuxClient{
-		Client:       tmux.NewClient(),
 		isRunning:    true,
 		sessions:     []tmux.SessionInfo{},
 		paneContents: make(map[string]string),
@@ -114,8 +112,8 @@ func TestForceRescan_Success(t *testing.T) {
 	testTmux.paneContents["test-session:0"] = "bash terminal content"
 	testTmux.paneContents["test-session:1"] = "I'm Claude, an AI assistant created by Anthropic"
 
-	// Create Windows view
-	w := views.NewWindows(db, nil, testTmux.Client)
+	// Create Windows view with mock client
+	w := views.NewWindows(db, nil, testTmux)
 
 	// Execute force rescan
 	result := w.PerformForceRescan()
@@ -158,7 +156,7 @@ func TestForceRescan_TmuxNotRunning(t *testing.T) {
 	testTmux := NewTestTmuxClient()
 	testTmux.isRunning = false
 
-	w := views.NewWindows(db, nil, testTmux.Client)
+	w := views.NewWindows(db, nil, testTmux)
 	result := w.PerformForceRescan()
 
 	errorMsg, ok := result.(types.ErrorMsg)
@@ -186,7 +184,7 @@ func TestForceRescan_ListSessionsError(t *testing.T) {
 	testTmux := NewTestTmuxClient()
 	testTmux.sessionsErr = fmt.Errorf("tmux connection failed")
 
-	w := views.NewWindows(db, nil, testTmux.Client)
+	w := views.NewWindows(db, nil, testTmux)
 	result := w.PerformForceRescan()
 
 	errorMsg, ok := result.(types.ErrorMsg)
@@ -228,7 +226,7 @@ func TestForceRescan_PanicRecovery(t *testing.T) {
 				}
 			}
 
-			w := views.NewWindows(db, nil, testTmux.Client)
+			w := views.NewWindows(db, nil, testTmux)
 
 			// This should not panic - the panic recovery should catch it
 			result := w.PerformForceRescan()
@@ -247,7 +245,7 @@ func TestForceRescan_EmptySessions(t *testing.T) {
 	testTmux := NewTestTmuxClient()
 	// sessions is already empty by default
 
-	w := views.NewWindows(db, nil, testTmux.Client)
+	w := views.NewWindows(db, nil, testTmux)
 	result := w.PerformForceRescan()
 
 	successMsg, ok := result.(types.SuccessMsg)

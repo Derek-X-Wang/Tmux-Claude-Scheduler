@@ -18,11 +18,18 @@ import (
 	"github.com/derekxwang/tcs/internal/utils"
 )
 
+// TmuxInterface defines the interface for tmux operations needed by Windows view
+type TmuxInterface interface {
+	IsRunning() bool
+	ListSessions() ([]tmux.SessionInfo, error)
+	CapturePane(target string, lines int) (string, error)
+}
+
 // Windows represents the window management view
 type Windows struct {
 	db              *gorm.DB
 	windowDiscovery *discovery.WindowDiscovery
-	tmuxClient      *tmux.Client
+	tmuxClient      TmuxInterface
 
 	// UI components
 	windowsTable table.Model
@@ -92,7 +99,7 @@ func DefaultWindowsKeyMap() WindowsKeyMap {
 }
 
 // NewWindows creates a new windows view
-func NewWindows(db *gorm.DB, windowDiscovery *discovery.WindowDiscovery, tmuxClient *tmux.Client) *Windows {
+func NewWindows(db *gorm.DB, windowDiscovery *discovery.WindowDiscovery, tmuxClient TmuxInterface) *Windows {
 	// Create windows table
 	windowsColumns := []table.Column{
 		{Title: "Session", Width: 12},
