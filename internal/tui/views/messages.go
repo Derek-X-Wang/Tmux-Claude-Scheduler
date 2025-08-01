@@ -210,7 +210,15 @@ func (m *Messages) Update(msg tea.Msg) (*Messages, tea.Cmd) {
 
 	case types.RefreshDataMsg:
 		if msg.Type == "all" || msg.Type == "messages" {
-			cmds = append(cmds, m.refreshData())
+			if msg.Data != nil {
+				// Handle message data refresh in main thread
+				if messages, ok := msg.Data.([]database.Message); ok {
+					m.refreshMessagesWithData(messages)
+				}
+			} else {
+				// Trigger new data fetch
+				cmds = append(cmds, m.refreshData())
+			}
 		}
 
 	case types.SuccessMsg:
@@ -350,17 +358,24 @@ func (m *Messages) renderMessagesTable() string {
 func (m *Messages) renderStats() string {
 	totalMessages := len(m.messages)
 	pendingMessages := 0
+	sentMessages := 0
+	failedMessages := 0
 	sessionCount := len(m.sessionGroups)
 
 	for _, msg := range m.messages {
-		if msg.Status == database.MessageStatusPending {
+		switch msg.Status {
+		case database.MessageStatusPending:
 			pendingMessages++
+		case database.MessageStatusSent:
+			sentMessages++
+		case database.MessageStatusFailed:
+			failedMessages++
 		}
 	}
 
 	stats := fmt.Sprintf(
-		"\nMessages: %d total, %d pending across %d sessions",
-		totalMessages, pendingMessages, sessionCount,
+		"\nMessages: %d total (%d pending, %d sent, %d failed) across %d sessions",
+		totalMessages, pendingMessages, sentMessages, failedMessages, sessionCount,
 	)
 
 	return m.inactiveStyle.Render(stats)
@@ -435,31 +450,37 @@ func (m *Messages) updateTableSizes() {
 // refreshData refreshes all messages data
 func (m *Messages) refreshData() tea.Cmd {
 	return tea.Cmd(func() tea.Msg {
-		m.refreshMessages()
+		if m.db == nil {
+			return types.ErrorMsg{Title: "Database Error", Message: "Database not available"}
+		}
 
+		// Get ALL messages (not just pending ones) like the scheduler window does
+		var messages []database.Message
+		err := m.db.Preload("Window").
+			Order("scheduled_time desc").
+			Limit(50).
+			Find(&messages).Error
+		if err != nil {
+			return types.ErrorMsg{Title: "Refresh failed", Message: err.Error()}
+		}
+
+		// Return the data in the message so UI updates happen in main thread
 		return types.RefreshDataMsg{
 			Type: "messages",
-			Data: nil,
+			Data: messages,
 		}
 	})
 }
 
-// refreshMessages refreshes messages data grouped by session
-func (m *Messages) refreshMessages() {
-	// Get all pending messages
-	messages, err := database.GetPendingMessages(m.db, 0)
-	if err != nil {
-		return
-	}
-
+// refreshMessagesWithData refreshes messages data using provided messages slice (called from main thread)
+func (m *Messages) refreshMessagesWithData(messages []database.Message) {
 	// Group by session for display as requested
 	m.sessionGroups = make(map[string][]database.Message)
 	var rows []table.Row
 
 	for _, msg := range messages {
-		// Load window info
-		err := m.db.Preload("Window").First(&msg, msg.ID).Error
-		if err != nil {
+		// Skip messages without window info
+		if msg.Window.Target == "" {
 			continue
 		}
 
