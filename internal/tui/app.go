@@ -242,28 +242,41 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.schedulerView.SetSize(msg.Width, msg.Height-4)
 
 	case tea.KeyMsg:
+		// Check if any view has an active form - if so, don't process navigation keys
+		hasActiveForm := false
+		switch a.currentView {
+		case MessagesView:
+			hasActiveForm = a.messages.IsFormActive()
+		case SchedulerView:
+			hasActiveForm = a.schedulerView.IsFormActive()
+		case DashboardView:
+			hasActiveForm = a.dashboard.IsFormActive()
+		case WindowsView:
+			hasActiveForm = a.windows.IsFormActive()
+		}
+
 		switch {
 		case key.Matches(msg, a.keyMap.Quit):
 			a.cleanup()
 			return a, tea.Quit
 
-		case key.Matches(msg, a.keyMap.Dashboard):
+		case key.Matches(msg, a.keyMap.Dashboard) && !hasActiveForm:
 			a.currentView = DashboardView
 			return a, nil
 
-		case key.Matches(msg, a.keyMap.Windows):
+		case key.Matches(msg, a.keyMap.Windows) && !hasActiveForm:
 			a.currentView = WindowsView
 			return a, nil
 
-		case key.Matches(msg, a.keyMap.Messages):
+		case key.Matches(msg, a.keyMap.Messages) && !hasActiveForm:
 			a.currentView = MessagesView
 			return a, nil
 
-		case key.Matches(msg, a.keyMap.Scheduler):
+		case key.Matches(msg, a.keyMap.Scheduler) && !hasActiveForm:
 			a.currentView = SchedulerView
 			return a, nil
 
-		case key.Matches(msg, a.keyMap.Refresh):
+		case key.Matches(msg, a.keyMap.Refresh) && !hasActiveForm:
 			cmds = append(cmds, func() tea.Msg {
 				return RefreshMsg{}
 			})

@@ -260,6 +260,11 @@ func (s *Scheduler) Update(msg tea.Msg) (*Scheduler, tea.Cmd) {
 	return s, tea.Batch(cmds...)
 }
 
+// IsFormActive returns true if the form is currently active
+func (s *Scheduler) IsFormActive() bool {
+	return s.showForm
+}
+
 // handleFormKeys handles key presses when form is shown
 func (s *Scheduler) handleFormKeys(msg tea.KeyMsg) (*Scheduler, tea.Cmd) {
 	var cmds []tea.Cmd

@@ -127,6 +127,11 @@ func (d *Dashboard) Update(msg tea.Msg) (*Dashboard, tea.Cmd) {
 	return d, tea.Batch(cmds...)
 }
 
+// IsFormActive returns true if the form is currently active (dashboard has no forms)
+func (d *Dashboard) IsFormActive() bool {
+	return false
+}
+
 // View renders the dashboard
 func (d *Dashboard) View() string {
 	if d.width == 0 {

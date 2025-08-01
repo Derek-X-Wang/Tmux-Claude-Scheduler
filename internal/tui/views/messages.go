@@ -226,6 +226,11 @@ func (m *Messages) Update(msg tea.Msg) (*Messages, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+// IsFormActive returns true if the form is currently active
+func (m *Messages) IsFormActive() bool {
+	return m.showForm
+}
+
 // handleFormKeys handles key presses when form is shown
 func (m *Messages) handleFormKeys(msg tea.KeyMsg) (*Messages, tea.Cmd) {
 	var cmds []tea.Cmd

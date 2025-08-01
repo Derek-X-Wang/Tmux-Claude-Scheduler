@@ -215,6 +215,11 @@ func (w *Windows) Update(msg tea.Msg) (*Windows, tea.Cmd) {
 	return w, tea.Batch(cmds...)
 }
 
+// IsFormActive returns true if the form is currently active (windows has no forms)
+func (w *Windows) IsFormActive() bool {
+	return false
+}
+
 // handleKeys handles key presses
 func (w *Windows) handleKeys(msg tea.KeyMsg) (*Windows, tea.Cmd) {
 	var cmds []tea.Cmd
