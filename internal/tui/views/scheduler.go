@@ -240,7 +240,27 @@ func (s *Scheduler) Update(msg tea.Msg) (*Scheduler, tea.Cmd) {
 
 	case types.RefreshDataMsg:
 		if msg.Type == "all" || msg.Type == "scheduler" || msg.Type == "messages" {
-			cmds = append(cmds, s.refreshData())
+			if msg.Data != nil {
+				// Handle scheduler data refresh in main thread
+				if dbMessages, ok := msg.Data.([]struct {
+					ID            uint
+					WindowID      uint
+					Content       string
+					Priority      int
+					Status        string
+					ScheduledTime time.Time
+					SentTime      *time.Time
+					CreatedAt     time.Time
+					Error         string
+					WindowTarget  string
+				}); ok {
+					s.refreshMessagesWithData(dbMessages)
+					s.refreshQueueWithData()
+				}
+			} else {
+				// Trigger new data fetch
+				cmds = append(cmds, s.refreshData())
+			}
 		}
 
 	case types.SuccessMsg:
@@ -510,44 +530,56 @@ func (s *Scheduler) updateTableSizes() {
 // refreshData refreshes all scheduler data
 func (s *Scheduler) refreshData() tea.Cmd {
 	return tea.Cmd(func() tea.Msg {
-		s.refreshMessages()
-		s.refreshQueue()
+		if s.db == nil {
+			return types.ErrorMsg{Title: "Database Error", Message: "Database not available"}
+		}
 
+		// Query all messages from the database (do DB operations in goroutine)
+		var dbMessages []struct {
+			ID            uint
+			WindowID      uint
+			Content       string
+			Priority      int
+			Status        string
+			ScheduledTime time.Time
+			SentTime      *time.Time
+			CreatedAt     time.Time
+			Error         string
+			WindowTarget  string
+		}
+
+		// Query messages with window information
+		err := s.db.Table("messages").
+			Select("messages.*, tmux_windows.target as window_target").
+			Joins("left join tmux_windows on tmux_windows.id = messages.window_id").
+			Order("scheduled_time desc").
+			Limit(50).
+			Find(&dbMessages).Error
+		if err != nil {
+			return types.ErrorMsg{Title: "Refresh failed", Message: err.Error()}
+		}
+
+		// Return the data in the message so UI updates happen in main thread
 		return types.RefreshDataMsg{
 			Type: "scheduler",
-			Data: nil,
+			Data: dbMessages,
 		}
 	})
 }
 
-// refreshMessages refreshes the messages data
-func (s *Scheduler) refreshMessages() {
-	if s.db == nil {
-		return
-	}
-
-	// Query all messages from the database
-	var dbMessages []struct {
-		ID            uint
-		WindowID      uint
-		Content       string
-		Priority      int
-		Status        string
-		ScheduledTime time.Time
-		SentTime      *time.Time
-		CreatedAt     time.Time
-		Error         string
-		WindowTarget  string
-	}
-
-	// Query messages with window information
-	s.db.Table("messages").
-		Select("messages.*, tmux_windows.target as window_target").
-		Joins("left join tmux_windows on tmux_windows.id = messages.window_id").
-		Order("scheduled_time desc").
-		Limit(50).
-		Find(&dbMessages)
-
+// refreshMessagesWithData refreshes messages data using provided message data (called from main thread)
+func (s *Scheduler) refreshMessagesWithData(dbMessages []struct {
+	ID            uint
+	WindowID      uint
+	Content       string
+	Priority      int
+	Status        string
+	ScheduledTime time.Time
+	SentTime      *time.Time
+	CreatedAt     time.Time
+	Error         string
+	WindowTarget  string
+}) {
 	s.messages = make([]types.MessageDisplayInfo, len(dbMessages))
 	var rows []table.Row
 
@@ -599,8 +631,8 @@ func (s *Scheduler) refreshMessages() {
 	s.messagesTable.SetRows(rows)
 }
 
-// refreshQueue refreshes the processing queue data
-func (s *Scheduler) refreshQueue() {
+// refreshQueueWithData refreshes the processing queue data (called from main thread)
+func (s *Scheduler) refreshQueueWithData() {
 	// Filter messages that are currently being processed or in queue
 	var queueItems []types.MessageDisplayInfo
 	var rows []table.Row

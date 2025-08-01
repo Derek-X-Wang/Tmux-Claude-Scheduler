@@ -113,7 +113,15 @@ func (d *Dashboard) Update(msg tea.Msg) (*Dashboard, tea.Cmd) {
 
 	case types.RefreshDataMsg:
 		if msg.Type == "all" || msg.Type == "usage" || msg.Type == "dashboard" {
-			cmds = append(cmds, d.refreshData())
+			if msg.Data != nil {
+				// Handle dashboard data refresh in main thread
+				if dashboardData, ok := msg.Data.(map[string]interface{}); ok {
+					d.updateStateWithData(dashboardData)
+				}
+			} else {
+				// Trigger new data fetch
+				cmds = append(cmds, d.refreshData())
+			}
 		}
 	}
 
@@ -171,38 +179,49 @@ func (d *Dashboard) Refresh() tea.Cmd {
 // refreshData refreshes all dashboard data
 func (d *Dashboard) refreshData() tea.Cmd {
 	return tea.Cmd(func() tea.Msg {
-		// Update state with fresh data
-		d.updateUsageStats()
-		d.updateWindowStats()
-		d.updateSystemStats()
-		d.updateSchedulerStats()
-		d.lastUpdate = time.Now()
+		// Collect all data in goroutine without modifying UI state
+		usageStats := d.collectUsageStats()
+		windowStats := d.collectWindowStats()
+		systemStats := d.collectSystemStats()
+		schedulerStats := d.collectSchedulerStats()
+
+		// Create dashboard data to pass to main thread (using individual components)
+		dashboardData := map[string]interface{}{
+			"usage":     usageStats,
+			"windows":   windowStats,
+			"system":    systemStats,
+			"scheduler": schedulerStats,
+		}
 
 		return types.RefreshDataMsg{
 			Type: "dashboard",
-			Data: d.state,
+			Data: dashboardData,
 		}
 	})
 }
 
-// updateUsageStats updates usage statistics
-func (d *Dashboard) updateUsageStats() {
+// collectUsageStats collects usage statistics (thread-safe data collection)
+func (d *Dashboard) collectUsageStats() types.UsageStats {
 	if d.usageMonitor == nil {
-		return
-	}
-
-	stats, err := d.usageMonitor.GetCurrentStats()
-	if err != nil {
-		d.state.Usage = types.UsageStats{
+		return types.UsageStats{
 			MessagesUsed:    0,
 			MessagesLimit:   config.Get().Usage.MaxMessages,
 			UsagePercentage: 0,
 			CanSendMessage:  false,
 		}
-		return
 	}
 
-	d.state.Usage = types.UsageStats{
+	stats, err := d.usageMonitor.GetCurrentStats()
+	if err != nil {
+		return types.UsageStats{
+			MessagesUsed:    0,
+			MessagesLimit:   config.Get().Usage.MaxMessages,
+			UsagePercentage: 0,
+			CanSendMessage:  false,
+		}
+	}
+
+	return types.UsageStats{
 		MessagesUsed:    stats.MessagesUsed,
 		MessagesLimit:   stats.MessageLimit, // Use dynamic limit instead of config
 		TokensUsed:      stats.TokensUsed,
@@ -220,12 +239,16 @@ func (d *Dashboard) updateUsageStats() {
 	}
 }
 
-// updateWindowStats updates window statistics grouped by tmux session for display
-func (d *Dashboard) updateWindowStats() {
+// collectWindowStats collects window statistics (thread-safe data collection)
+func (d *Dashboard) collectWindowStats() map[string]interface{} {
 	// Get window statistics
 	windows, err := database.GetActiveTmuxWindows(d.db)
 	if err != nil {
-		return
+		return map[string]interface{}{
+			"sessions":       []types.SessionDisplayInfo{},
+			"totalSessions":  0,
+			"activeSessions": 0,
+		}
 	}
 
 	// Group windows by session for display
@@ -235,7 +258,7 @@ func (d *Dashboard) updateWindowStats() {
 	}
 
 	// Convert to display format
-	d.state.Sessions = make([]types.SessionDisplayInfo, 0, len(sessionGroups))
+	sessions := make([]types.SessionDisplayInfo, 0, len(sessionGroups))
 	activeSessions := 0
 
 	for sessionName, sessionWindows := range sessionGroups {
@@ -288,22 +311,25 @@ func (d *Dashboard) updateWindowStats() {
 			Status:       status,
 		}
 
-		d.state.Sessions = append(d.state.Sessions, displayInfo)
+		sessions = append(sessions, displayInfo)
 	}
 
-	d.state.Database.TotalSessions = len(sessionGroups)
-	d.state.Database.ActiveSessions = activeSessions
+	return map[string]interface{}{
+		"sessions":       sessions,
+		"totalSessions":  len(sessionGroups),
+		"activeSessions": activeSessions,
+	}
 }
 
-// updateSystemStats updates system statistics
-func (d *Dashboard) updateSystemStats() {
+// collectSystemStats collects system statistics (thread-safe data collection)
+func (d *Dashboard) collectSystemStats() types.SystemInfo {
 	// Tmux status
 	tmuxRunning := d.tmuxClient.IsRunning()
-	d.state.System.TmuxRunning = tmuxRunning
+	var tmuxSessions []types.TmuxSessionInfo
 
 	if tmuxRunning {
 		if sessions, err := d.tmuxClient.ListSessions(); err == nil {
-			tmuxSessions := make([]types.TmuxSessionInfo, len(sessions))
+			tmuxSessions = make([]types.TmuxSessionInfo, len(sessions))
 			for i, session := range sessions {
 				windows := make([]types.TmuxWindowInfo, len(session.Windows))
 				for j, window := range session.Windows {
@@ -322,38 +348,87 @@ func (d *Dashboard) updateSystemStats() {
 					Connected: true,
 				}
 			}
-			d.state.System.TmuxSessions = tmuxSessions
 		}
 	}
 
-	// Database status
-	d.state.System.DatabaseConnected = d.db != nil
-	d.state.System.DatabasePath = config.Get().Database.Path
-	d.state.System.LastRefresh = time.Now()
+	return types.SystemInfo{
+		TmuxRunning:       tmuxRunning,
+		TmuxSessions:      tmuxSessions,
+		DatabaseConnected: d.db != nil,
+		DatabasePath:      config.Get().Database.Path,
+		LastRefresh:       time.Now(),
+	}
 }
 
-// updateSchedulerStats updates scheduler statistics
-func (d *Dashboard) updateSchedulerStats() {
+// collectSchedulerStats collects scheduler statistics (thread-safe data collection)
+func (d *Dashboard) collectSchedulerStats() map[string]interface{} {
 	cfg := config.Get()
-	d.state.Scheduler.SmartSchedulerEnabled = cfg.Scheduler.SmartEnabled
-	d.state.Scheduler.CronSchedulerEnabled = cfg.Scheduler.CronEnabled
 
+	var pending, sent, failed int64
 	// Get message counts from database
 	if d.db != nil {
-		var pending, sent, failed int64
 		d.db.Model(&database.Message{}).Where("status = ?", "pending").Count(&pending)
 		d.db.Model(&database.Message{}).Where("status = ?", "sent").Count(&sent)
 		d.db.Model(&database.Message{}).Where("status = ?", "failed").Count(&failed)
-
-		d.state.Scheduler.PendingMessages = int(pending)
-		d.state.Scheduler.SentMessages = int(sent)
-		d.state.Scheduler.FailedMessages = int(failed)
-
-		d.state.Database.PendingMessages = int(pending)
-		d.state.Database.SentMessages = int(sent)
-		d.state.Database.FailedMessages = int(failed)
-		d.state.Database.TotalMessages = int(pending + sent + failed)
 	}
+
+	return map[string]interface{}{
+		"schedulerStats": types.SchedulerStats{
+			SmartSchedulerEnabled: cfg.Scheduler.SmartEnabled,
+			CronSchedulerEnabled:  cfg.Scheduler.CronEnabled,
+			PendingMessages:       int(pending),
+			SentMessages:          int(sent),
+			FailedMessages:        int(failed),
+		},
+		"databaseStats": types.DatabaseStats{
+			PendingMessages: int(pending),
+			SentMessages:    int(sent),
+			FailedMessages:  int(failed),
+			TotalMessages:   int(pending + sent + failed),
+		},
+	}
+}
+
+// updateStateWithData updates the dashboard state with collected data (called from main thread)
+func (d *Dashboard) updateStateWithData(dashboardData map[string]interface{}) {
+	// Update usage stats
+	if usageStats, ok := dashboardData["usage"].(types.UsageStats); ok {
+		d.state.Usage = usageStats
+	}
+
+	// Update window stats
+	if windowStats, ok := dashboardData["windows"].(map[string]interface{}); ok {
+		if sessions, ok := windowStats["sessions"].([]types.SessionDisplayInfo); ok {
+			d.state.Sessions = sessions
+		}
+		if totalSessions, ok := windowStats["totalSessions"].(int); ok {
+			d.state.Database.TotalSessions = totalSessions
+		}
+		if activeSessions, ok := windowStats["activeSessions"].(int); ok {
+			d.state.Database.ActiveSessions = activeSessions
+		}
+	}
+
+	// Update system stats
+	if systemStats, ok := dashboardData["system"].(types.SystemInfo); ok {
+		d.state.System = systemStats
+	}
+
+	// Update scheduler stats
+	if schedulerData, ok := dashboardData["scheduler"].(map[string]interface{}); ok {
+		if schedulerStats, ok := schedulerData["schedulerStats"].(types.SchedulerStats); ok {
+			d.state.Scheduler = schedulerStats
+		}
+		if dbStats, ok := schedulerData["databaseStats"].(types.DatabaseStats); ok {
+			d.state.Database.PendingMessages = dbStats.PendingMessages
+			d.state.Database.SentMessages = dbStats.SentMessages
+			d.state.Database.FailedMessages = dbStats.FailedMessages
+			d.state.Database.TotalMessages = dbStats.TotalMessages
+		}
+	}
+
+	// Update last refresh time
+	d.lastUpdate = time.Now()
 }
 
 // renderUsageOverview renders the usage overview section matching Claude Monitor format
