@@ -560,7 +560,7 @@ func (m *Messages) handleFormSubmit() (*Messages, tea.Cmd) {
 	if when != "" && when != "now" {
 		if when[0] == '+' {
 			if duration, err := time.ParseDuration(when[1:]); err == nil {
-				scheduledTime = time.Now().Add(duration)
+				scheduledTime = roundTimeToMinute(time.Now().Add(duration))
 			}
 		} else {
 			if t, err := time.Parse("15:04", when); err == nil {
@@ -686,6 +686,11 @@ func (m *Messages) clearForm() {
 	m.whenInput.SetValue("")
 	m.editMode = false
 	m.editingID = 0
+}
+
+// roundTimeToMinute rounds a time down to the nearest minute (ignores seconds)
+func roundTimeToMinute(t time.Time) time.Time {
+	return t.Truncate(time.Minute)
 }
 
 // Helper functions - remove these as they're duplicated in other files

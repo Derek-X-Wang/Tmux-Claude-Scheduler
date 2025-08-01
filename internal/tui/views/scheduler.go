@@ -689,7 +689,7 @@ func (s *Scheduler) scheduleMessage(sessionName, content string, priority int, w
 				if err != nil {
 					return types.ErrorMsg{Title: "Invalid time format", Message: err.Error()}
 				}
-				scheduledTime = time.Now().Add(duration)
+				scheduledTime = roundScheduledTimeToMinute(time.Now().Add(duration))
 			} else {
 				// Try to parse as time (e.g., "14:30")
 				scheduledTime, err = time.Parse("15:04", when)
@@ -773,6 +773,11 @@ func (s *Scheduler) cancelMessage(id uint) tea.Cmd {
 			Message: fmt.Sprintf("Canceled message with ID %d", id),
 		}
 	})
+}
+
+// roundScheduledTimeToMinute rounds a time down to the nearest minute (ignores seconds)
+func roundScheduledTimeToMinute(t time.Time) time.Time {
+	return t.Truncate(time.Minute)
 }
 
 // max returns the maximum of two integers
