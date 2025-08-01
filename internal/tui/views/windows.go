@@ -2,8 +2,8 @@ package views
 
 import (
 	"fmt"
+	"log"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -16,13 +16,21 @@ import (
 	"github.com/derekxwang/tcs/internal/discovery"
 	"github.com/derekxwang/tcs/internal/tmux"
 	"github.com/derekxwang/tcs/internal/types"
+	"github.com/derekxwang/tcs/internal/utils"
 )
+
+// TmuxInterface defines the interface for tmux operations needed by Windows view
+type TmuxInterface interface {
+	IsRunning() bool
+	ListSessions() ([]tmux.SessionInfo, error)
+	CapturePane(target string, lines int) (string, error)
+}
 
 // Windows represents the window management view
 type Windows struct {
 	db              *gorm.DB
 	windowDiscovery *discovery.WindowDiscovery
-	tmuxClient      *tmux.Client
+	tmuxClient      TmuxInterface
 
 	// UI components
 	windowsTable table.Model
@@ -92,7 +100,7 @@ func DefaultWindowsKeyMap() WindowsKeyMap {
 }
 
 // NewWindows creates a new windows view
-func NewWindows(db *gorm.DB, windowDiscovery *discovery.WindowDiscovery, tmuxClient *tmux.Client) *Windows {
+func NewWindows(db *gorm.DB, windowDiscovery *discovery.WindowDiscovery, tmuxClient TmuxInterface) *Windows {
 	// Create windows table
 	windowsColumns := []table.Column{
 		{Title: "Session", Width: 12},
@@ -178,6 +186,21 @@ func (w *Windows) Update(msg tea.Msg) (*Windows, tea.Cmd) {
 
 	case types.RefreshDataMsg:
 		if msg.Type == "all" || msg.Type == "windows" {
+			if msg.Data != nil {
+				// Handle window data refresh in main thread
+				if windows, ok := msg.Data.([]database.TmuxWindow); ok {
+					w.refreshWindowsWithData(windows)
+					w.refreshQueuesWithData(windows)
+				}
+			} else {
+				// Trigger new data fetch
+				cmds = append(cmds, w.refreshData())
+			}
+		}
+
+	case types.SuccessMsg:
+		// After successful operations, trigger a refresh
+		if msg.Title == "Force Rescan Complete" || msg.Title == "Window Updated" {
 			cmds = append(cmds, w.refreshData())
 		}
 	}
@@ -310,7 +333,7 @@ func (w *Windows) renderStats() string {
 
 // renderHelp renders the help text
 func (w *Windows) renderHelp() string {
-	help := "\ns: Scan  F: Force Rescan  a: Toggle Active  tab: Switch Table  r: Refresh"
+	help := "\ns: Scan (discovery service)  F: Force Rescan (manual)  a: Toggle Active  tab: Switch Table  r: Refresh"
 	return w.inactiveStyle.Render(help)
 }
 
@@ -342,23 +365,29 @@ func (w *Windows) updateTableSizes() {
 // refreshData refreshes all windows data
 func (w *Windows) refreshData() tea.Cmd {
 	return tea.Cmd(func() tea.Msg {
-		w.refreshWindows()
-		w.refreshQueues()
+		// Add panic recovery
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("PANIC in windows.refreshData: %v", r)
+			}
+		}()
 
+		// Get ALL active windows, not just those with Claude
+		windows, err := database.GetAllActiveTmuxWindows(w.db)
+		if err != nil {
+			return types.ErrorMsg{Title: "Refresh failed", Message: err.Error()}
+		}
+
+		// Return the data in the message so UI updates happen in main thread
 		return types.RefreshDataMsg{
 			Type: "windows",
-			Data: nil,
+			Data: windows,
 		}
 	})
 }
 
-// refreshWindows refreshes discovered windows data
-func (w *Windows) refreshWindows() {
-	windows, err := database.GetActiveTmuxWindows(w.db)
-	if err != nil {
-		return
-	}
-
+// refreshWindowsWithData refreshes windows data using provided windows slice
+func (w *Windows) refreshWindowsWithData(windows []database.TmuxWindow) {
 	w.windows = windows
 	var rows []table.Row
 
@@ -390,13 +419,8 @@ func (w *Windows) refreshWindows() {
 	w.windowsTable.SetRows(rows)
 }
 
-// refreshQueues refreshes queue data grouped by session
-func (w *Windows) refreshQueues() {
-	windows, err := database.GetActiveTmuxWindows(w.db)
-	if err != nil {
-		return
-	}
-
+// refreshQueuesWithData refreshes queue data using provided windows slice
+func (w *Windows) refreshQueuesWithData(windows []database.TmuxWindow) {
 	// Group by session and calculate pending messages
 	w.sessionQueues = make(map[string][]WindowQueueInfo)
 	var rows []table.Row
@@ -447,90 +471,132 @@ func (w *Windows) refreshQueues() {
 	w.queueTable.SetRows(rows)
 }
 
-// scanWindows triggers a window scan
+// scanWindows triggers a window scan with auto-refresh
 func (w *Windows) scanWindows() tea.Cmd {
 	return tea.Cmd(func() tea.Msg {
-		if w.windowDiscovery != nil {
-			if err := w.windowDiscovery.ForceRescan(); err != nil {
-				return types.ErrorMsg{Title: "Scan failed", Message: err.Error()}
+		if w.windowDiscovery == nil {
+			return types.ErrorMsg{
+				Title:   "Window Discovery Not Available",
+				Message: "Window discovery service is not initialized. Use Force Rescan (F) instead.",
 			}
 		}
 
-		// Refresh data after scan
-		go func() {
-			time.Sleep(500 * time.Millisecond)
-			w.refreshWindows()
-			w.refreshQueues()
-		}()
+		if !w.windowDiscovery.IsRunning() {
+			return types.ErrorMsg{
+				Title:   "Window Discovery Not Running",
+				Message: "Window discovery service is not running. Use Force Rescan (F) for manual scan.",
+			}
+		}
 
-		return types.SuccessMsg{
-			Title:   "Window Scan",
-			Message: "Scanning for new windows...",
+		if err := w.windowDiscovery.ForceRescan(); err != nil {
+			return types.ErrorMsg{
+				Title:   "Scan Failed",
+				Message: fmt.Sprintf("Window discovery error: %v. Try Force Rescan (F) for manual scan.", err),
+			}
+		}
+
+		// Sleep for 2 seconds to allow scan to complete
+		time.Sleep(2 * time.Second)
+
+		// Trigger a refresh after scan
+		return types.RefreshDataMsg{
+			Type: "windows",
+			Data: nil,
 		}
 	})
 }
 
+// ForceRescan forces a complete rescan (public for testing)
+func (w *Windows) ForceRescan() tea.Cmd {
+	return w.forceRescan()
+}
+
 // forceRescan forces a complete rescan
 func (w *Windows) forceRescan() tea.Cmd {
-	return tea.Cmd(func() tea.Msg {
-		if w.tmuxClient == nil {
-			return types.ErrorMsg{Title: "Error", Message: "Tmux client not available"}
-		}
-
-		if !w.tmuxClient.IsRunning() {
-			return types.ErrorMsg{Title: "Error", Message: "Tmux server is not running"}
-		}
-
-		// Perform manual discovery
-		sessions, err := w.tmuxClient.ListSessions()
-		if err != nil {
-			return types.ErrorMsg{Title: "Rescan failed", Message: err.Error()}
-		}
-
-		windowCount := 0
-		claudeCount := 0
-
-		for _, session := range sessions {
-			for _, window := range session.Windows {
-				// Detect Claude
-				hasClaude := false
-				content, err := w.tmuxClient.CapturePane(window.Target, 50)
-				if err == nil {
-					hasClaude = isClaudeWindow(content)
-				}
-
-				// Create or update window
-				_, err = database.CreateOrUpdateTmuxWindow(
-					w.db,
-					window.SessionName,
-					window.WindowIndex,
-					window.WindowName,
-					hasClaude,
-				)
-				if err != nil {
-					continue
-				}
-
-				windowCount++
-				if hasClaude {
-					claudeCount++
+	return tea.Cmd(func() (result tea.Msg) {
+		// Double-layer panic recovery - protect the entire command
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Printf("Panic in forceRescan tea.Cmd wrapper: %v\n", r)
+				result = types.ErrorMsg{
+					Title:   "Force Rescan Failed",
+					Message: fmt.Sprintf("Command wrapper panic: %v", r),
 				}
 			}
-		}
-
-		// Refresh data
-		go func() {
-			time.Sleep(200 * time.Millisecond)
-			w.refreshWindows()
-			w.refreshQueues()
 		}()
 
-		return types.SuccessMsg{
-			Title: "Force Rescan Complete",
-			Message: fmt.Sprintf("Found %d windows (%d with Claude) across %d sessions",
-				windowCount, claudeCount, len(sessions)),
-		}
+		// Call the actual implementation
+		return w.PerformForceRescan()
 	})
+}
+
+// PerformForceRescan does the actual force rescan work with proper panic recovery
+// Made public for testing purposes
+func (w *Windows) PerformForceRescan() (result tea.Msg) {
+	defer func() {
+		if r := recover(); r != nil {
+			// Log the panic for debugging and return error message
+			fmt.Printf("Force rescan panic recovered: %v\n", r)
+			result = types.ErrorMsg{
+				Title:   "Force Rescan Failed",
+				Message: fmt.Sprintf("Panic occurred during force rescan: %v", r),
+			}
+		}
+	}()
+
+	if w.tmuxClient == nil {
+		return types.ErrorMsg{Title: "Error", Message: "Tmux client not available"}
+	}
+
+	if !w.tmuxClient.IsRunning() {
+		return types.ErrorMsg{Title: "Error", Message: "Tmux server is not running"}
+	}
+
+	// Perform manual discovery
+	sessions, err := w.tmuxClient.ListSessions()
+	if err != nil {
+		return types.ErrorMsg{Title: "Rescan failed", Message: err.Error()}
+	}
+
+	windowCount := 0
+	claudeCount := 0
+
+	for _, session := range sessions {
+		for _, window := range session.Windows {
+			// Detect Claude
+			hasClaude := false
+			content, err := w.tmuxClient.CapturePane(window.Target, 50)
+			if err == nil {
+				hasClaude = utils.IsClaudeWindow(content)
+			}
+
+			// Create or update window
+			_, err = database.CreateOrUpdateTmuxWindow(
+				w.db,
+				window.SessionName,
+				window.WindowIndex,
+				window.WindowName,
+				hasClaude,
+			)
+			if err != nil {
+				continue
+			}
+
+			windowCount++
+			if hasClaude {
+				claudeCount++
+			}
+		}
+	}
+
+	// Sleep briefly to ensure database writes are complete
+	time.Sleep(500 * time.Millisecond)
+
+	return types.SuccessMsg{
+		Title: "Force Rescan Complete",
+		Message: fmt.Sprintf("Found %d windows (%d with Claude) across %d sessions. Data refreshed.",
+			windowCount, claudeCount, len(sessions)),
+	}
 }
 
 // toggleWindowActive toggles a window's active state
@@ -546,12 +612,8 @@ func (w *Windows) toggleWindowActive(window database.TmuxWindow) tea.Cmd {
 			}
 		}
 
-		// Refresh data
-		go func() {
-			time.Sleep(100 * time.Millisecond)
-			w.refreshWindows()
-			w.refreshQueues()
-		}()
+		// Invalidate cache since window active state changed
+		database.InvalidateActiveTmuxWindowsCache()
 
 		status := "activated"
 		if !newActive {
@@ -563,20 +625,4 @@ func (w *Windows) toggleWindowActive(window database.TmuxWindow) tea.Cmd {
 			Message: fmt.Sprintf("Window %s %s", window.Target, status),
 		}
 	})
-}
-
-// isClaudeWindow checks if window content indicates a Claude session
-func isClaudeWindow(content string) bool {
-	claudeIndicators := []string{
-		"claude", "Claude", "anthropic", "Assistant:", "Human:",
-		"I'm Claude", "claude-3", "I'm an AI assistant", "Claude Code", "claude-code",
-	}
-
-	contentLower := strings.ToLower(content)
-	for _, indicator := range claudeIndicators {
-		if strings.Contains(contentLower, strings.ToLower(indicator)) {
-			return true
-		}
-	}
-	return false
 }

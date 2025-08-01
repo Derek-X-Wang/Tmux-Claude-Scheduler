@@ -2,7 +2,25 @@
 
 ## Project Overview
 
-TCS is a sophisticated window-based scheduler for managing Claude conversations across multiple tmux windows. It automatically discovers Claude instances, manages message queues per window, and provides intelligent scheduling to maximize Claude subscription usage within 5-hour windows.
+TCS is a sophisticated window-based scheduler for managing Claude conversations across multiple tmux windows. It automatically discovers Claude instances, manages message queues per window, and provides intelligent scheduling to maximize Claude subscription usage within dynamic 5-hour windows that start from your first message.
+
+## Development Commands
+
+For development, testing, and maintenance of TCS, use the following `make` commands:
+
+```bash
+# Run tests
+make test
+
+# Build the project  
+make build
+
+# Run linter
+make lint
+
+# Run all checks (test + build + lint)
+make all
+```
 
 ## Architecture Revolution: Session-Based → Window-Based
 
@@ -176,15 +194,40 @@ func MigrateMessagesToWindows(db *gorm.DB) error
 - Automatic migration on first run
 - Data integrity preserved during transition
 
-## Configuration Updates
+## Claude Usage Tracking - Dynamic 5-Hour Windows
 
-### New Configuration Options
+### How Claude's Usage Limits Work
+
+**IMPORTANT**: Claude does NOT use fixed reset times like "12 PM every day." Instead:
+
+1. **Dynamic Window Start**: Your 5-hour usage window begins when you send your **first message** to Claude
+2. **Window Duration**: Each window lasts exactly 5 hours from that first message
+3. **Example**: If you send your first message at 7:00 AM, your usage window runs from 7:00 AM to 12:00 PM (noon)
+4. **Reset Time**: The "reset time" is always `first_message_time + 5 hours`
+
+### TCS Implementation
+
+TCS correctly implements this dynamic behavior:
+
+- **Automatic Detection**: Reads your actual Claude usage data from `~/.claude` directory
+- **Dynamic Windows**: Creates usage windows that match Claude's actual session timing
+- **Real-time Tracking**: Updates window boundaries based on your actual usage patterns
+- **No Manual Configuration**: No need to set reset hours - TCS discovers them automatically
+
+### Configuration Options
 ```yaml
 # Window discovery settings
 discovery:
   scan_interval: "30s"      # How often to scan for windows
   claude_detection: true    # Enable Claude detection
   cleanup_interval: "5m"    # Remove stale windows
+
+# Usage tracking (dynamic windows)
+usage:
+  max_messages: 1000        # Message limit per 5-hour window
+  max_tokens: 100000        # Token limit (if available)
+  window_duration: "5h"     # Always 5 hours for Claude
+  monitoring_interval: "30s" # How often to check usage
 
 # Queue management
 queues:

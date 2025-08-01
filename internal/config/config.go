@@ -28,6 +28,9 @@ type Config struct {
 
 	// Tmux configuration
 	Tmux TmuxConfig `mapstructure:"tmux" json:"tmux"`
+
+	// Claude data processing configuration
+	Claude ClaudeConfig `mapstructure:"claude" json:"claude"`
 }
 
 // DatabaseConfig holds database configuration
@@ -62,6 +65,7 @@ type UsageConfig struct {
 	MaxTokens          int           `mapstructure:"max_tokens" json:"max_tokens"`
 	WindowDuration     time.Duration `mapstructure:"window_duration" json:"window_duration"`
 	MonitoringInterval time.Duration `mapstructure:"monitoring_interval" json:"monitoring_interval"`
+	// NOTE: Claude uses dynamic 5-hour windows that start from the first message sent, not fixed reset times
 }
 
 // LoggingConfig holds logging configuration
@@ -73,9 +77,20 @@ type LoggingConfig struct {
 
 // TmuxConfig holds tmux configuration
 type TmuxConfig struct {
-	DiscoveryInterval   time.Duration `mapstructure:"discovery_interval" json:"discovery_interval"`
-	HealthCheckInterval time.Duration `mapstructure:"health_check_interval" json:"health_check_interval"`
-	MessageDelay        time.Duration `mapstructure:"message_delay" json:"message_delay"`
+	DiscoveryInterval     time.Duration `mapstructure:"discovery_interval" json:"discovery_interval"`
+	HealthCheckInterval   time.Duration `mapstructure:"health_check_interval" json:"health_check_interval"`
+	MessageDelay          time.Duration `mapstructure:"message_delay" json:"message_delay"`
+	ClaudeDetectionMethod string        `mapstructure:"claude_detection_method" json:"claude_detection_method"` // "process", "text", or "both"
+	ClaudeProcessNames    []string      `mapstructure:"claude_process_names" json:"claude_process_names"`       // Process names to look for
+}
+
+// ClaudeConfig holds Claude data processing configuration
+type ClaudeConfig struct {
+	DataDirectory      string        `mapstructure:"data_directory" json:"data_directory"`               // Override default ~/.claude directory
+	MaxFileSize        int64         `mapstructure:"max_file_size" json:"max_file_size"`                 // Maximum file size in bytes (default: 52428800 = 50MB)
+	MaxEntriesPerFile  int           `mapstructure:"max_entries_per_file" json:"max_entries_per_file"`   // Maximum entries to process per file (default: 100000)
+	MaxEntriesInMemory int           `mapstructure:"max_entries_in_memory" json:"max_entries_in_memory"` // Maximum valid entries to keep in memory (default: 50000)
+	ProcessingTimeout  time.Duration `mapstructure:"processing_timeout" json:"processing_timeout"`       // Timeout for processing files (default: 30s)
 }
 
 // global configuration instance
@@ -96,12 +111,12 @@ func Load(configPath string) (*Config, error) {
 	}
 
 	// Default config paths
-	homeDir, _ := os.UserConfigDir()
-	v.AddConfigPath(filepath.Join(homeDir, "tcs"))
+	homeDir, _ := os.UserHomeDir()
+	v.AddConfigPath(filepath.Join(homeDir, ".tcs"))
 	v.AddConfigPath(".")
 
 	// Environment variable configuration
-	v.SetEnvPrefix("CUM")
+	v.SetEnvPrefix("TCS")
 	v.AutomaticEnv()
 
 	// Set defaults
@@ -159,6 +174,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("usage.max_tokens", 100000)
 	v.SetDefault("usage.window_duration", 5*time.Hour)
 	v.SetDefault("usage.monitoring_interval", 30*time.Second)
+	// NOTE: Claude uses dynamic 5-hour windows starting from first message, not fixed reset times
 
 	// Logging defaults
 	v.SetDefault("logging.level", "info")
@@ -169,6 +185,15 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("tmux.discovery_interval", 30*time.Second)
 	v.SetDefault("tmux.health_check_interval", 60*time.Second)
 	v.SetDefault("tmux.message_delay", 500*time.Millisecond)
+	v.SetDefault("tmux.claude_detection_method", "both") // "process", "text", or "both"
+	v.SetDefault("tmux.claude_process_names", []string{"claude-code", "claude_code", "claude"})
+
+	// Claude data processing defaults
+	v.SetDefault("claude.data_directory", "")             // Empty means use default ~/.claude
+	v.SetDefault("claude.max_file_size", int64(52428800)) // 50MB in bytes
+	v.SetDefault("claude.max_entries_per_file", 100000)   // Maximum entries to process per file
+	v.SetDefault("claude.max_entries_in_memory", 50000)   // Maximum valid entries to keep in memory
+	v.SetDefault("claude.processing_timeout", 30*time.Second)
 }
 
 // validateConfig validates the configuration
@@ -201,6 +226,8 @@ func validateConfig(config *Config) error {
 		return fmt.Errorf("usage window duration must be at least 1 hour")
 	}
 
+	// NOTE: Claude reset hour validation removed - now using dynamic 5-hour windows
+
 	// Validate logging level
 	validLevels := []string{"debug", "info", "warn", "error", "fatal"}
 	levelValid := false
@@ -219,12 +246,12 @@ func validateConfig(config *Config) error {
 
 // getDefaultDatabasePath returns the default database path
 func getDefaultDatabasePath() string {
-	homeDir, err := os.UserConfigDir()
+	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		homeDir = os.TempDir()
 	}
 
-	configDir := filepath.Join(homeDir, "tcs")
+	configDir := filepath.Join(homeDir, ".tcs")
 	return filepath.Join(configDir, "tcs.db")
 }
 
@@ -282,6 +309,7 @@ func GetUsageConfig() UsageConfig {
 			MaxTokens:          100000,
 			WindowDuration:     5 * time.Hour,
 			MonitoringInterval: 30 * time.Second,
+			// ClaudeResetHour removed - dynamic windows used instead
 		}
 	}
 	return appConfig.Usage
@@ -347,12 +375,12 @@ func SaveConfig(configPath string) error {
 
 // getDefaultConfigPath returns the default config file path
 func getDefaultConfigPath() string {
-	homeDir, err := os.UserConfigDir()
+	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		homeDir = os.TempDir()
 	}
 
-	configDir := filepath.Join(homeDir, "tcs")
+	configDir := filepath.Join(homeDir, ".tcs")
 	return filepath.Join(configDir, "config.yaml")
 }
 
@@ -389,6 +417,7 @@ func GenerateDefaultConfig(configPath string) error {
 			MaxTokens:          100000,
 			WindowDuration:     5 * time.Hour,
 			MonitoringInterval: 30 * time.Second,
+			// ClaudeResetHour removed - dynamic windows used instead
 		},
 		Logging: LoggingConfig{
 			Level:  "info",

@@ -34,6 +34,10 @@ func setupTestDB(t *testing.T) *gorm.DB {
 
 // TestSchedulerInitialization tests scheduler initialization
 func TestSchedulerInitialization(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode - depends on real Claude data")
+	}
+
 	db := setupTestDB(t)
 
 	// Create mock components
@@ -181,6 +185,10 @@ func TestMessageStatusUpdates(t *testing.T) {
 
 // TestSchedulerWithUsageLimits tests scheduler respects usage limits
 func TestSchedulerWithUsageLimits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode - depends on real Claude data")
+	}
+
 	db := setupTestDB(t)
 
 	// Setup components
@@ -371,6 +379,10 @@ func TestMessageProcessingOrder(t *testing.T) {
 
 // TestSchedulerShutdown tests graceful scheduler shutdown
 func TestSchedulerShutdown(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode - depends on real Claude data")
+	}
+
 	db := setupTestDB(t)
 
 	// Setup components

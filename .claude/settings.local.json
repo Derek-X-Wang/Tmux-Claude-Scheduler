@@ -49,7 +49,9 @@
       "Bash(make:*)",
       "Bash(go:*)",
       "Bash(awk:*)",
-      "Bash(~/go/bin/goimports -w internal/ cmd/ tests/ main.go)"
+      "Bash(~/go/bin/goimports -w internal/ cmd/ tests/ main.go)",
+      "Bash(./bin/tcs:*)",
+      "Bash(sqlite3:*)"
     ],
     "deny": []
   }

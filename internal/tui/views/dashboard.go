@@ -199,15 +199,19 @@ func (d *Dashboard) updateUsageStats() {
 
 	d.state.Usage = types.UsageStats{
 		MessagesUsed:    stats.MessagesUsed,
-		MessagesLimit:   config.Get().Usage.MaxMessages,
+		MessagesLimit:   stats.MessageLimit, // Use dynamic limit instead of config
 		TokensUsed:      stats.TokensUsed,
-		TokensLimit:     config.Get().Usage.MaxTokens,
+		TokensLimit:     stats.TokenLimit, // Use dynamic limit instead of config
+		CostUsed:        stats.CostUsed,
+		CostLimit:       stats.CostLimit,
 		UsagePercentage: stats.UsagePercentage,
 		TimeRemaining:   stats.TimeRemaining,
 		WindowStartTime: stats.WindowStartTime,
 		WindowEndTime:   stats.WindowEndTime,
 		CanSendMessage:  stats.CanSendMessage,
 		CurrentWindow:   stats.CurrentWindow,
+		DynamicLimits:   stats.DynamicLimits,
+		WindowsActive:   stats.WindowsActive,
 	}
 }
 
@@ -332,9 +336,9 @@ func (d *Dashboard) updateSchedulerStats() {
 	// Get message counts from database
 	if d.db != nil {
 		var pending, sent, failed int64
-		d.db.Model(&types.MessageDisplayInfo{}).Where("status = ?", "pending").Count(&pending)
-		d.db.Model(&types.MessageDisplayInfo{}).Where("status = ?", "sent").Count(&sent)
-		d.db.Model(&types.MessageDisplayInfo{}).Where("status = ?", "failed").Count(&failed)
+		d.db.Model(&database.Message{}).Where("status = ?", "pending").Count(&pending)
+		d.db.Model(&database.Message{}).Where("status = ?", "sent").Count(&sent)
+		d.db.Model(&database.Message{}).Where("status = ?", "failed").Count(&failed)
 
 		d.state.Scheduler.PendingMessages = int(pending)
 		d.state.Scheduler.SentMessages = int(sent)
@@ -347,47 +351,140 @@ func (d *Dashboard) updateSchedulerStats() {
 	}
 }
 
-// renderUsageOverview renders the usage overview section
+// renderUsageOverview renders the usage overview section matching Claude Monitor format
 func (d *Dashboard) renderUsageOverview() string {
 	usage := d.state.Usage
 
-	// Progress bar
-	progressPercent := usage.UsagePercentage
-	if progressPercent > 1.0 {
-		progressPercent = 1.0
+	// Main title
+	var title string
+	if usage.DynamicLimits {
+		title = "📊 Session-Based Dynamic Limits\nBased on your historical usage patterns when hitting limits (P90)"
+	} else {
+		title = "📊 Usage Overview"
 	}
 
-	progressBar := d.usageProgress.ViewAs(progressPercent)
+	// Calculate individual percentages for color coding
+	messagePercentage := 0.0
+	tokenPercentage := 0.0
+	costPercentage := 0.0
 
-	// Usage details
+	if usage.MessagesLimit > 0 {
+		messagePercentage = float64(usage.MessagesUsed) / float64(usage.MessagesLimit)
+	}
+	if usage.TokensLimit > 0 {
+		tokenPercentage = float64(usage.TokensUsed) / float64(usage.TokensLimit)
+	}
+	if usage.CostLimit > 0 {
+		costPercentage = usage.CostUsed / usage.CostLimit
+	}
+
+	// Helper function for color coding and icons
+	getUsageColor := func(percentage float64) (string, string) {
+		if percentage >= 0.75 {
+			return "🔴", "9" // Red
+		} else if percentage >= 0.5 {
+			return "🟡", "11" // Yellow
+		}
+		return "🟢", "10" // Green
+	}
+
+	// Helper function for clamping float64 values to 1.0
+	clampToOne := func(value float64) float64 {
+		if value > 1.0 {
+			return 1.0
+		}
+		return value
+	}
+
+	// Cost usage line (most important)
+	costIcon, costColor := getUsageColor(costPercentage)
+	costStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(costColor))
+	costBar := d.usageProgress.ViewAs(clampToOne(costPercentage))
+	costLine := fmt.Sprintf("💰 Cost Usage:           %s [%s] %.1f%%    $%.2f / $%.2f",
+		costIcon, costBar, costPercentage*100, usage.CostUsed, usage.CostLimit)
+
+	// Token usage line
+	tokenIcon, tokenColor := getUsageColor(tokenPercentage)
+	tokenStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(tokenColor))
+	tokenBar := d.usageProgress.ViewAs(clampToOne(tokenPercentage))
+	tokenLine := fmt.Sprintf("📊 Token Usage:          %s [%s] %.1f%%    %s / %s",
+		tokenIcon, tokenBar, tokenPercentage*100,
+		d.formatNumber(usage.TokensUsed), d.formatNumber(usage.TokensLimit))
+
+	// Message usage line
+	messageIcon, messageColor := getUsageColor(messagePercentage)
+	messageStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(messageColor))
+	messageBar := d.usageProgress.ViewAs(clampToOne(messagePercentage))
+	messageLine := fmt.Sprintf("📨 Messages Usage:       %s [%s] %.1f%%    %d / %d",
+		messageIcon, messageBar, messagePercentage*100, usage.MessagesUsed, usage.MessagesLimit)
+
+	// Time remaining
+	timeUsed := 1.0 - (float64(usage.TimeRemaining.Seconds()) / (5 * time.Hour).Seconds())
+	timeIcon, timeColor := getUsageColor(timeUsed)
+	timeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(timeColor))
+	timeBar := d.usageProgress.ViewAs(clampToOne(timeUsed))
+	timeLine := fmt.Sprintf("⏱️  Time to Reset:       %s [%s] %s",
+		timeIcon, timeBar, usage.TimeRemaining.Round(time.Minute).String())
+
+	// Status message
 	var statusColor lipgloss.Color = "10" // Green
 	var statusText = "✓ Can send messages"
-
 	if !usage.CanSendMessage {
 		statusColor = "9" // Red
 		statusText = "✗ Cannot send messages"
-	} else if usage.UsagePercentage > 0.8 {
-		statusColor = "11" // Yellow
-		statusText = "⚠ High usage"
 	}
-
-	statusStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(statusColor)
+	statusStyle := lipgloss.NewStyle().Bold(true).Foreground(statusColor)
 
 	content := fmt.Sprintf(
-		"%s\n\n%s\n\nMessages: %s\nTime Remaining: %s\nWindow: %s - %s\nStatus: %s",
-		d.sectionStyle.Render("📊 Usage Overview"),
-		progressBar,
-		d.valueStyle.Render(fmt.Sprintf("%d/%d (%.1f%%)",
-			usage.MessagesUsed, usage.MessagesLimit, usage.UsagePercentage*100)),
-		d.valueStyle.Render(usage.TimeRemaining.Round(time.Minute).String()),
+		"%s\n────────────────────────────────────────────────────────────\n%s\n\n%s\n\n%s\n────────────────────────────────────────────────────────────\n%s\n\nWindow: %s - %s\nStatus: %s",
+		d.sectionStyle.Render(title),
+		costStyle.Render(costLine),
+		tokenStyle.Render(tokenLine),
+		messageStyle.Render(messageLine),
+		timeStyle.Render(timeLine),
 		d.valueStyle.Render(usage.WindowStartTime.Format("15:04")),
 		d.valueStyle.Render(usage.WindowEndTime.Format("15:04")),
 		statusStyle.Render(statusText),
 	)
 
 	return d.cardStyle.Width(d.width - 4).Render(content)
+}
+
+// formatNumber formats large numbers with commas for readability
+func (d *Dashboard) formatNumber(n int) string {
+	if n >= 1000 {
+		return fmt.Sprintf("%s", humanizeNumber(n))
+	}
+	return strconv.Itoa(n)
+}
+
+// humanizeNumber converts large numbers to human readable format
+func humanizeNumber(n int) string {
+	if n >= 1000000 {
+		return fmt.Sprintf("%.1fM", float64(n)/1000000)
+	}
+	if n >= 1000 {
+		return fmt.Sprintf("%s", addCommas(n))
+	}
+	return strconv.Itoa(n)
+}
+
+// addCommas adds commas to numbers for readability
+func addCommas(n int) string {
+	str := strconv.Itoa(n)
+	length := len(str)
+	if length <= 3 {
+		return str
+	}
+
+	result := ""
+	for i, char := range str {
+		if i > 0 && (length-i)%3 == 0 {
+			result += ","
+		}
+		result += string(char)
+	}
+	return result
 }
 
 // renderSystemStatus renders the system status section

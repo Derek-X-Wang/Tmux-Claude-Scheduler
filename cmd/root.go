@@ -3,18 +3,22 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/derekxwang/tcs/internal/config"
 	"github.com/derekxwang/tcs/internal/database"
+	"github.com/derekxwang/tcs/internal/discovery"
 	"github.com/derekxwang/tcs/internal/monitor"
 	"github.com/derekxwang/tcs/internal/scheduler"
 	"github.com/derekxwang/tcs/internal/tmux"
 	"github.com/derekxwang/tcs/internal/tui"
+	"github.com/derekxwang/tcs/internal/utils"
 )
 
 var (
@@ -57,12 +61,14 @@ func init() {
 	cobra.OnInitialize(initConfig)
 
 	// Global flags
-	rootCmd.PersistentFlags().StringVar(&configFile, "config", "", "config file (default is $HOME/.config/tcs/config.yaml)")
+	rootCmd.PersistentFlags().StringVar(&configFile, "config", "", "config file (default is $HOME/.tcs/config.yaml)")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "verbose output")
 	rootCmd.PersistentFlags().BoolVar(&dryRun, "dry-run", false, "show what would be done without executing")
 
 	// Add subcommands
+	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(tuiCmd)
+	rootCmd.AddCommand(daemonCmd)
 	rootCmd.AddCommand(windowCmd)
 	rootCmd.AddCommand(queueCmd)
 	rootCmd.AddCommand(messageCmd)
@@ -89,6 +95,21 @@ func initConfig() {
 	}
 }
 
+// Init command
+var initCmd = &cobra.Command{
+	Use:   "init",
+	Short: "Initialize TCS with complete setup",
+	Long: `Initialize TCS by setting up configuration, scanning tmux windows, and preparing the system for use.
+This command will:
+- Generate default configuration file
+- Scan and discover tmux windows with Claude detection
+- Initialize the database
+- Show initial status and next steps`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runInit()
+	},
+}
+
 // TUI command
 var tuiCmd = &cobra.Command{
 	Use:   "tui",
@@ -96,6 +117,16 @@ var tuiCmd = &cobra.Command{
 	Long:  `Launch the interactive TUI dashboard for monitoring and controlling Claude usage.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runTUI()
+	},
+}
+
+// Daemon command
+var daemonCmd = &cobra.Command{
+	Use:   "daemon",
+	Short: "Run TCS scheduler in daemon mode",
+	Long:  `Run the TCS scheduler continuously in the background to process scheduled messages.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runDaemon()
 	},
 }
 
@@ -284,8 +315,11 @@ func runWindowList() error {
 	}
 	defer database.Close()
 
-	// Get all discovered windows
-	windows, err := database.GetActiveTmuxWindows(database.GetDB())
+	// Get all discovered windows (both with and without Claude)
+	var windows []database.TmuxWindow
+	err := database.GetDB().Where("active = ?", true).
+		Order("session_name ASC, window_index ASC").
+		Find(&windows).Error
 	if err != nil {
 		return fmt.Errorf("failed to get windows: %w", err)
 	}
@@ -351,11 +385,39 @@ func runWindowScan() error {
 
 	for _, session := range sessions {
 		for _, window := range session.Windows {
-			// Detect Claude
+			// Detect Claude using configured detection method
 			hasClaude := false
-			content, err := tmuxClient.CapturePane(window.Target, 50)
-			if err == nil {
-				hasClaude = isClaudeWindow(content)
+			cfg := config.Get()
+			detectionMethod := cfg.Tmux.ClaudeDetectionMethod
+			processNames := cfg.Tmux.ClaudeProcessNames
+
+			switch detectionMethod {
+			case "process":
+				// Process-based detection only
+				processDetected, err := tmuxClient.DetectClaudeProcessWithNames(window.Target, processNames)
+				if err == nil && processDetected {
+					hasClaude = true
+				}
+			case "text":
+				// Content-based detection only
+				content, err := tmuxClient.CapturePane(window.Target, 50)
+				if err == nil {
+					hasClaude = utils.IsClaudeWindow(content)
+				}
+			case "both":
+				fallthrough
+			default:
+				// Try process detection first (more reliable for Claude Code)
+				processDetected, err := tmuxClient.DetectClaudeProcessWithNames(window.Target, processNames)
+				if err == nil && processDetected {
+					hasClaude = true
+				} else {
+					// Fallback to content-based detection
+					content, err := tmuxClient.CapturePane(window.Target, 50)
+					if err == nil {
+						hasClaude = utils.IsClaudeWindow(content)
+					}
+				}
 			}
 
 			// Create or update window
@@ -519,32 +581,30 @@ func runQueueStatus(sessionName string) error {
 }
 
 func runMessageAdd(target, content string, priority int, when string) error {
-	// Parse schedule time
-	var scheduledTime time.Time
-	var err error
+	// Validate target format (session:window)
+	if target == "" {
+		return fmt.Errorf("target cannot be empty")
+	}
+	if !strings.Contains(target, ":") {
+		return fmt.Errorf("target must be in format 'session:window' (e.g., 'project:0'), got: %s", target)
+	}
+	parts := strings.SplitN(target, ":", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return fmt.Errorf("invalid target format '%s'. Use 'session:window' (e.g., 'project:0')", target)
+	}
 
-	switch when {
-	case "now":
-		scheduledTime = time.Now()
-	default:
-		// Try to parse as duration (e.g., "+5m")
-		if when[0] == '+' {
-			duration, err := time.ParseDuration(when[1:])
-			if err != nil {
-				return fmt.Errorf("invalid duration format: %s", when)
-			}
-			scheduledTime = time.Now().Add(duration)
-		} else {
-			// Try to parse as time (e.g., "14:30")
-			scheduledTime, err = time.Parse("15:04", when)
-			if err != nil {
-				return fmt.Errorf("invalid time format: %s (use HH:MM or +duration)", when)
-			}
-			// If time is in the past, schedule for tomorrow
-			if scheduledTime.Before(time.Now()) {
-				scheduledTime = scheduledTime.AddDate(0, 0, 1)
-			}
-		}
+	// Validate content length (reasonable limit for CLI usage)
+	if len(content) == 0 {
+		return fmt.Errorf("message content cannot be empty")
+	}
+	if len(content) > 100000 { // 100KB limit
+		return fmt.Errorf("message content too long (%d characters, max 100,000)", len(content))
+	}
+
+	// Parse schedule time with comprehensive validation
+	scheduledTime, err := parseScheduleTime(when)
+	if err != nil {
+		return fmt.Errorf("invalid schedule time: %w", err)
 	}
 
 	// Initialize components
@@ -582,9 +642,54 @@ func runMessageAdd(target, content string, priority int, when string) error {
 		message.ID, target, scheduledTime.Format(time.RFC3339), priority)
 
 	if when == "now" {
-		fmt.Println("Message will be sent immediately by the scheduler.")
+		// For immediate messages, start scheduler temporarily to process them
+		fmt.Println("Sending message immediately...")
+		if err := schedulerInstance.Start(); err != nil {
+			return fmt.Errorf("failed to start scheduler: %w", err)
+		}
+
+		// Give the scheduler a moment to initialize and load the queue
+		time.Sleep(100 * time.Millisecond)
+
+		// Add the message directly to the scheduler queue for immediate processing
+		schedulerInstance.AddMessage(message)
+
+		// Trigger immediate processing
+		schedulerInstance.TriggerImmediateProcessing()
+
+		// Wait for scheduler to process the message
+		fmt.Print("Processing")
+		messageProcessed := false
+		for i := 0; i < 10; i++ { // Wait up to 10 seconds for immediate processing
+			time.Sleep(500 * time.Millisecond)
+			fmt.Print(".")
+
+			// Check if THIS specific message was processed
+			var updatedMessage database.Message
+			err := database.GetDB().First(&updatedMessage, message.ID).Error
+			if err == nil && updatedMessage.Status != database.MessageStatusPending {
+				// Our specific message was processed
+				if updatedMessage.Status == database.MessageStatusSent {
+					messageProcessed = true
+				}
+				break
+			}
+		}
+		fmt.Println()
+
+		// Stop the scheduler
+		if err := schedulerInstance.Stop(); err != nil {
+			fmt.Printf("Warning: failed to stop scheduler: %v\n", err)
+		}
+
+		if messageProcessed {
+			fmt.Println("Message sent!")
+		} else {
+			fmt.Println("Message queued - run 'tcs tui' or 'tcs daemon' to process pending messages")
+		}
 	} else {
 		fmt.Printf("Message will be sent in %s\n", time.Until(scheduledTime).Round(time.Second))
+		fmt.Println("Note: Run 'tcs tui' to start the scheduler and process scheduled messages.")
 	}
 
 	return nil
@@ -659,8 +764,8 @@ func runStatus() error {
 func runConfigInit() error {
 	configPath := configFile
 	if configPath == "" {
-		homeDir, _ := os.UserConfigDir()
-		configPath = fmt.Sprintf("%s/tcs/config.yaml", homeDir)
+		homeDir, _ := os.UserHomeDir()
+		configPath = fmt.Sprintf("%s/.tcs/config.yaml", homeDir)
 	}
 
 	if err := config.GenerateDefaultConfig(configPath); err != nil {
@@ -827,32 +932,17 @@ func runMessageEdit(messageIDStr, content, target string, priority int, when str
 		updates["content"] = content
 	}
 
-	if priority >= 1 && priority <= 10 {
+	if priority != 0 { // 0 means not specified (default flag value)
+		if priority < 1 || priority > 10 {
+			return fmt.Errorf("priority must be between 1 and 10, got %d", priority)
+		}
 		updates["priority"] = priority
 	}
 
 	if when != "" {
-		var scheduledTime time.Time
-		switch when {
-		case "now":
-			scheduledTime = time.Now()
-		default:
-			// Parse time (reuse logic from runMessageAdd)
-			if when[0] == '+' {
-				duration, err := time.ParseDuration(when[1:])
-				if err != nil {
-					return fmt.Errorf("invalid duration format: %s", when)
-				}
-				scheduledTime = time.Now().Add(duration)
-			} else {
-				scheduledTime, err = time.Parse("15:04", when)
-				if err != nil {
-					return fmt.Errorf("invalid time format: %s", when)
-				}
-				if scheduledTime.Before(time.Now()) {
-					scheduledTime = scheduledTime.AddDate(0, 0, 1)
-				}
-			}
+		scheduledTime, err := parseScheduleTime(when)
+		if err != nil {
+			return fmt.Errorf("invalid schedule time: %w", err)
 		}
 		updates["scheduled_time"] = scheduledTime
 	}
@@ -915,20 +1005,72 @@ func runMessageDelete(messageIDStr string) error {
 	return nil
 }
 
-// Helper functions
-func isClaudeWindow(content string) bool {
-	claudeIndicators := []string{
-		"claude", "Claude", "anthropic", "Assistant:", "Human:",
-		"I'm Claude", "claude-3", "I'm an AI assistant", "Claude Code", "claude-code",
+// Helper functions (using optimized detection from utils package)
+
+// parseScheduleTime parses time input with comprehensive validation
+// Supports: "now", "+duration", "HH:MM", "YYYY-MM-DD HH:MM"
+func parseScheduleTime(when string) (time.Time, error) {
+	if when == "" {
+		return time.Time{}, fmt.Errorf("time cannot be empty")
 	}
 
-	contentLower := strings.ToLower(content)
-	for _, indicator := range claudeIndicators {
-		if strings.Contains(contentLower, strings.ToLower(indicator)) {
-			return true
+	switch when {
+	case "now":
+		return time.Now(), nil
+	default:
+		// Handle relative time (+duration)
+		if len(when) > 1 && when[0] == '+' {
+			duration, err := time.ParseDuration(when[1:])
+			if err != nil {
+				return time.Time{}, fmt.Errorf("invalid duration format '%s': %w (use formats like +1h, +30m, +5s)", when, err)
+			}
+
+			// Validate reasonable duration limits
+			if duration < 0 {
+				return time.Time{}, fmt.Errorf("duration cannot be negative: %s", when)
+			}
+			if duration > 30*24*time.Hour { // 30 days
+				return time.Time{}, fmt.Errorf("duration too large (max 30 days): %s", when)
+			}
+
+			return time.Now().Add(duration), nil
 		}
+
+		// Try parsing as time in different formats
+		now := time.Now()
+
+		// Try HH:MM format first (most common)
+		if t, err := time.Parse("15:04", when); err == nil {
+			// Combine with today's date
+			scheduledTime := time.Date(now.Year(), now.Month(), now.Day(),
+				t.Hour(), t.Minute(), 0, 0, now.Location())
+
+			// If time is in the past, schedule for tomorrow
+			if scheduledTime.Before(now) {
+				scheduledTime = scheduledTime.AddDate(0, 0, 1)
+			}
+			return scheduledTime, nil
+		}
+
+		// Try full datetime format: YYYY-MM-DD HH:MM
+		if t, err := time.Parse("2006-01-02 15:04", when); err == nil {
+			if t.Before(now) {
+				return time.Time{}, fmt.Errorf("scheduled time cannot be in the past: %s", when)
+			}
+			return t, nil
+		}
+
+		// Try date only format: YYYY-MM-DD (schedule for 9 AM)
+		if t, err := time.Parse("2006-01-02", when); err == nil {
+			scheduledTime := time.Date(t.Year(), t.Month(), t.Day(), 9, 0, 0, 0, now.Location())
+			if scheduledTime.Before(now) {
+				return time.Time{}, fmt.Errorf("scheduled date cannot be in the past: %s", when)
+			}
+			return scheduledTime, nil
+		}
+
+		return time.Time{}, fmt.Errorf("invalid time format '%s'. Supported formats: 'now', '+duration', 'HH:MM', 'YYYY-MM-DD HH:MM', 'YYYY-MM-DD'", when)
 	}
-	return false
 }
 
 func truncateString(s string, maxLen int) string {
@@ -940,6 +1082,209 @@ func truncateString(s string, maxLen int) string {
 
 func runTUI() error {
 	return tui.Run()
+}
+
+func runDaemon() error {
+	fmt.Println("🚀 Starting TCS Scheduler Daemon")
+	fmt.Println("=================================")
+
+	// Initialize database
+	if err := database.Initialize(nil); err != nil {
+		return fmt.Errorf("failed to initialize database: %w", err)
+	}
+	defer database.Close()
+
+	// Initialize components
+	tmuxClient := tmux.NewClient()
+	usageMonitor := monitor.NewUsageMonitor(database.GetDB())
+
+	if err := usageMonitor.Initialize(); err != nil {
+		return fmt.Errorf("failed to initialize usage monitor: %w", err)
+	}
+
+	// Create and start window discovery service
+	fmt.Println("Starting window discovery...")
+	windowDiscovery := discovery.NewWindowDiscovery(database.GetDB(), tmuxClient, nil)
+	if err := windowDiscovery.Start(); err != nil {
+		return fmt.Errorf("failed to start window discovery: %w", err)
+	}
+	defer func() {
+		fmt.Println("Stopping window discovery...")
+		if err := windowDiscovery.Stop(); err != nil {
+			fmt.Printf("Warning: failed to stop window discovery: %v\n", err)
+		}
+	}()
+
+	// Create scheduler
+	schedulerInstance := scheduler.NewScheduler(
+		database.GetDB(),
+		tmuxClient,
+		usageMonitor,
+		nil,
+	)
+
+	if err := schedulerInstance.Initialize(); err != nil {
+		return fmt.Errorf("failed to initialize scheduler: %w", err)
+	}
+
+	// Start the scheduler
+	fmt.Println("Starting scheduler...")
+	if err := schedulerInstance.Start(); err != nil {
+		return fmt.Errorf("failed to start scheduler: %w", err)
+	}
+	defer func() {
+		fmt.Println("Stopping scheduler...")
+		if err := schedulerInstance.Stop(); err != nil {
+			fmt.Printf("Warning: failed to stop scheduler: %v\n", err)
+		}
+	}()
+
+	fmt.Println("✅ TCS Daemon is running")
+	fmt.Println("  - Window Discovery: Scanning tmux windows every 30s")
+	fmt.Println("  - Scheduler: Processing message queue")
+	fmt.Println("  - Usage Monitor: Tracking Claude usage")
+	fmt.Println("Press Ctrl+C to stop")
+
+	// Set up signal handling for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// Wait for signal
+	sig := <-sigChan
+	fmt.Printf("\nReceived signal: %v. Shutting down gracefully...\n", sig)
+
+	return nil
+}
+
+func runInit() error {
+	fmt.Println("🚀 Initializing TCS (Tmux Claude Scheduler)")
+	fmt.Println("==========================================")
+	fmt.Println()
+
+	// Step 1: Generate configuration if it doesn't exist
+	fmt.Print("📝 Setting up configuration... ")
+	configPath := configFile
+	if configPath == "" {
+		homeDir, _ := os.UserHomeDir()
+		configPath = fmt.Sprintf("%s/.tcs/config.yaml", homeDir)
+	}
+
+	// Check if config already exists
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		if err := config.GenerateDefaultConfig(configPath); err != nil {
+			fmt.Printf("❌ Failed\n")
+			return fmt.Errorf("failed to generate config: %w", err)
+		}
+		fmt.Printf("✅ Created at %s\n", configPath)
+	} else {
+		fmt.Printf("✅ Already exists at %s\n", configPath)
+	}
+
+	// Step 2: Initialize database (now uses correct ~/.tcs path by default)
+	fmt.Print("💾 Initializing database... ")
+	if err := database.Initialize(nil); err != nil {
+		fmt.Printf("❌ Failed\n")
+		return fmt.Errorf("failed to initialize database: %w", err)
+	}
+	defer database.Close()
+	fmt.Printf("✅ Ready\n")
+
+	// Step 3: Check tmux connectivity
+	fmt.Print("🖥️  Checking tmux connection... ")
+	tmuxClient := tmux.NewClient()
+	if !tmuxClient.IsRunning() {
+		fmt.Printf("⚠️  Not running\n")
+		fmt.Println("   Please start tmux first: tmux new-session -d")
+		fmt.Println("   Then run 'tcs init' again to complete setup")
+		return nil
+	}
+	fmt.Printf("✅ Connected\n")
+
+	// Step 4: Scan tmux windows
+	fmt.Print("🔍 Scanning tmux windows... ")
+	sessions, err := tmuxClient.ListSessions()
+	if err != nil {
+		fmt.Printf("❌ Failed\n")
+		return fmt.Errorf("failed to list sessions: %w", err)
+	}
+
+	windowCount := 0
+	claudeCount := 0
+
+	for _, session := range sessions {
+		for _, window := range session.Windows {
+			// Detect Claude
+			hasClaude := false
+			content, err := tmuxClient.CapturePane(window.Target, 50)
+			if err == nil {
+				hasClaude = utils.IsClaudeWindow(content)
+			}
+
+			// Create or update window
+			_, err = database.CreateOrUpdateTmuxWindow(
+				database.GetDB(),
+				window.SessionName,
+				window.WindowIndex,
+				window.WindowName,
+				hasClaude,
+			)
+			if err != nil {
+				fmt.Printf("❌ Failed to save window %s\n", window.Target)
+				continue
+			}
+
+			windowCount++
+			if hasClaude {
+				claudeCount++
+			}
+		}
+	}
+	fmt.Printf("✅ Found %d windows (%d with Claude)\n", windowCount, claudeCount)
+
+	// Step 5: Initialize usage monitor
+	fmt.Print("⏱️  Setting up usage monitoring... ")
+	usageMonitor := monitor.NewUsageMonitor(database.GetDB())
+	if err := usageMonitor.Initialize(); err != nil {
+		fmt.Printf("❌ Failed\n")
+		return fmt.Errorf("failed to initialize usage monitor: %w", err)
+	}
+	fmt.Printf("✅ Ready\n")
+
+	// Step 6: Show initial status
+	fmt.Println()
+	fmt.Println("📊 Initial Status")
+	fmt.Println("-----------------")
+
+	usageStats, err := usageMonitor.GetCurrentStats()
+	if err != nil {
+		fmt.Printf("Warning: Could not get usage stats: %v\n", err)
+	} else {
+		fmt.Printf("Current Usage Window: %s to %s\n",
+			usageStats.WindowStartTime.Format("15:04"),
+			usageStats.WindowEndTime.Format("15:04"))
+		fmt.Printf("Messages Used: %d/%d (%.1f%%)\n",
+			usageStats.MessagesUsed,
+			config.Get().Usage.MaxMessages,
+			usageStats.UsagePercentage*100)
+		fmt.Printf("Time Until Reset: %s\n", usageStats.TimeRemaining.Round(time.Minute))
+	}
+
+	fmt.Printf("Tmux Sessions: %d\n", len(sessions))
+	fmt.Printf("Windows Discovered: %d\n", windowCount)
+	fmt.Printf("Claude Windows: %d\n", claudeCount)
+
+	// Step 7: Show next steps
+	fmt.Println()
+	fmt.Println("🎉 TCS is now ready!")
+	fmt.Println("Next steps:")
+	fmt.Println("  • Run 'tcs status' to see current usage")
+	fmt.Println("  • Run 'tcs tui' for the interactive dashboard")
+	fmt.Println("  • Run 'tcs window list' to see discovered windows")
+	fmt.Println("  • Use 'tcs message add' to schedule Claude messages")
+	fmt.Println()
+	fmt.Println("For help: tcs --help")
+
+	return nil
 }
 
 // SetVersionInfo sets the version information for the CLI

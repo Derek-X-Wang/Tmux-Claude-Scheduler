@@ -21,12 +21,16 @@ type UsageStats struct {
 	MessagesLimit   int                   `json:"messages_limit"`
 	TokensUsed      int                   `json:"tokens_used"`
 	TokensLimit     int                   `json:"tokens_limit"`
+	CostUsed        float64               `json:"cost_used"`
+	CostLimit       float64               `json:"cost_limit"`
 	UsagePercentage float64               `json:"usage_percentage"`
 	TimeRemaining   time.Duration         `json:"time_remaining"`
 	WindowStartTime time.Time             `json:"window_start_time"`
 	WindowEndTime   time.Time             `json:"window_end_time"`
 	CanSendMessage  bool                  `json:"can_send_message"`
 	CurrentWindow   *database.UsageWindow `json:"current_window"`
+	DynamicLimits   bool                  `json:"dynamic_limits"`
+	WindowsActive   int                   `json:"windows_active"`
 }
 
 // SessionDisplayInfo represents session information for display

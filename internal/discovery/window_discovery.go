@@ -4,14 +4,15 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"strings"
 	"sync"
 	"time"
 
 	"gorm.io/gorm"
 
+	"github.com/derekxwang/tcs/internal/config"
 	"github.com/derekxwang/tcs/internal/database"
 	"github.com/derekxwang/tcs/internal/tmux"
+	"github.com/derekxwang/tcs/internal/utils"
 )
 
 // WindowDiscovery manages automatic discovery and tracking of tmux windows
@@ -215,25 +216,61 @@ func (wd *WindowDiscovery) processSessions(session tmux.SessionInfo) {
 
 // processWindow processes a single window
 func (wd *WindowDiscovery) processWindow(windowInfo tmux.WindowInfo) {
+	log.Printf("Processing window: %s (session: %s, index: %d)",
+		windowInfo.Target, windowInfo.SessionName, windowInfo.WindowIndex)
+
 	// Detect if window has Claude (if enabled)
 	hasClaude := false
 	if wd.config.ClaudeDetection {
-		content, err := wd.tmuxClient.CapturePane(windowInfo.Target, 50)
-		if err == nil {
-			hasClaude = wd.isClaudeWindow(content)
-			if hasClaude {
-				wd.mu.Lock()
-				wd.stats.ClaudeWindowsFound++
-				wd.mu.Unlock()
+		cfg := config.Get()
+		detectionMethod := cfg.Tmux.ClaudeDetectionMethod
+		processNames := cfg.Tmux.ClaudeProcessNames
+
+		switch detectionMethod {
+		case "process":
+			// Process-based detection only
+			processDetected, err := wd.tmuxClient.DetectClaudeProcessWithNames(windowInfo.Target, processNames)
+			if err == nil && processDetected {
+				hasClaude = true
 			}
+		case "text":
+			// Content-based detection only
+			content, err := wd.tmuxClient.CapturePane(windowInfo.Target, 50)
+			if err == nil {
+				hasClaude = wd.isClaudeWindow(content)
+			}
+		case "both":
+		default:
+			// Try process detection first (more reliable for Claude Code)
+			processDetected, err := wd.tmuxClient.DetectClaudeProcessWithNames(windowInfo.Target, processNames)
+			if err == nil && processDetected {
+				hasClaude = true
+			} else {
+				// Fallback to content-based detection
+				content, err := wd.tmuxClient.CapturePane(windowInfo.Target, 50)
+				if err == nil {
+					hasClaude = wd.isClaudeWindow(content)
+				}
+			}
+		}
+
+		if hasClaude {
+			wd.mu.Lock()
+			wd.stats.ClaudeWindowsFound++
+			wd.mu.Unlock()
+			log.Printf("Window %s detected as Claude window", windowInfo.Target)
+		} else {
+			log.Printf("Window %s does NOT have Claude detected", windowInfo.Target)
 		}
 	}
 
 	if !wd.config.PersistDiscovered {
+		log.Printf("Not persisting window %s (PersistDiscovered=false)", windowInfo.Target)
 		return // Don't persist to database
 	}
 
 	// Create or update window in database
+	log.Printf("Saving window %s to database", windowInfo.Target)
 	dbWindow, err := database.CreateOrUpdateTmuxWindow(
 		wd.db,
 		windowInfo.SessionName,
@@ -242,9 +279,11 @@ func (wd *WindowDiscovery) processWindow(windowInfo tmux.WindowInfo) {
 		hasClaude,
 	)
 	if err != nil {
+		log.Printf("ERROR: Failed to save window %s: %v", windowInfo.Target, err)
 		wd.emitError(fmt.Errorf("failed to create/update window %s: %w", windowInfo.Target, err))
 		return
 	}
+	log.Printf("Successfully saved window %s to database (ID: %d)", windowInfo.Target, dbWindow.ID)
 
 	// Check if this is a newly discovered window
 	isNewWindow := dbWindow.CreatedAt.After(time.Now().Add(-wd.config.ScanInterval * 2))
@@ -303,27 +342,7 @@ func (wd *WindowDiscovery) cleanupInactiveWindows() {
 
 // isClaudeWindow checks if window content indicates a Claude session
 func (wd *WindowDiscovery) isClaudeWindow(content string) bool {
-	claudeIndicators := []string{
-		"claude",
-		"Claude",
-		"anthropic",
-		"Assistant:",
-		"Human:",
-		"I'm Claude",
-		"claude-3",
-		"I'm an AI assistant",
-		"Claude Code",
-		"claude-code",
-	}
-
-	contentLower := strings.ToLower(content)
-	for _, indicator := range claudeIndicators {
-		if strings.Contains(contentLower, strings.ToLower(indicator)) {
-			return true
-		}
-	}
-
-	return false
+	return utils.IsClaudeWindow(content)
 }
 
 // countTotalWindows counts total windows across all sessions

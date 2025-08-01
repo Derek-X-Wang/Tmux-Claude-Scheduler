@@ -2,9 +2,11 @@ package database
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 // Message represents a scheduled message (window-based architecture)
@@ -226,11 +228,57 @@ func GetTmuxWindow(db *gorm.DB, target string) (*TmuxWindow, error) {
 	return &window, nil
 }
 
+// Cache for GetActiveTmuxWindows to reduce database queries
+var (
+	activeTmuxWindowsCache      []TmuxWindow
+	activeTmuxWindowsCacheTime  time.Time
+	activeTmuxWindowsCacheMutex sync.RWMutex
+)
+
 // GetActiveTmuxWindows returns all active tmux windows with Claude
 func GetActiveTmuxWindows(db *gorm.DB) ([]TmuxWindow, error) {
+	// Check cache first (valid for 2 seconds)
+	activeTmuxWindowsCacheMutex.RLock()
+	if time.Since(activeTmuxWindowsCacheTime) < 2*time.Second && activeTmuxWindowsCache != nil {
+		// Return cached copy
+		cached := make([]TmuxWindow, len(activeTmuxWindowsCache))
+		copy(cached, activeTmuxWindowsCache)
+		activeTmuxWindowsCacheMutex.RUnlock()
+		return cached, nil
+	}
+	activeTmuxWindowsCacheMutex.RUnlock()
+
+	// Cache miss or expired, query database
 	var windows []TmuxWindow
 	err := db.Where("active = ? AND has_claude = ?", true, true).
 		Order("priority DESC, session_name ASC, window_index ASC").
+		Find(&windows).Error
+
+	if err == nil {
+		// Update cache
+		activeTmuxWindowsCacheMutex.Lock()
+		activeTmuxWindowsCache = make([]TmuxWindow, len(windows))
+		copy(activeTmuxWindowsCache, windows)
+		activeTmuxWindowsCacheTime = time.Now()
+		activeTmuxWindowsCacheMutex.Unlock()
+	}
+
+	return windows, err
+}
+
+// InvalidateActiveTmuxWindowsCache invalidates the cache when windows are modified
+func InvalidateActiveTmuxWindowsCache() {
+	activeTmuxWindowsCacheMutex.Lock()
+	activeTmuxWindowsCache = nil
+	activeTmuxWindowsCacheTime = time.Time{}
+	activeTmuxWindowsCacheMutex.Unlock()
+}
+
+// GetAllActiveTmuxWindows returns all active tmux windows (regardless of Claude status)
+func GetAllActiveTmuxWindows(db *gorm.DB) ([]TmuxWindow, error) {
+	var windows []TmuxWindow
+	err := db.Where("active = ?", true).
+		Order("session_name ASC, window_index ASC").
 		Find(&windows).Error
 	return windows, err
 }
@@ -240,7 +288,9 @@ func CreateOrUpdateTmuxWindow(db *gorm.DB, sessionName string, windowIndex int, 
 	target := fmt.Sprintf("%s:%d", sessionName, windowIndex)
 
 	var window TmuxWindow
-	err := db.Where("target = ?", target).First(&window).Error
+	// Use silent logger for expected "record not found" during window discovery
+	err := db.Session(&gorm.Session{Logger: db.Logger.LogMode(logger.Silent)}).
+		Where("target = ?", target).First(&window).Error
 
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
@@ -258,6 +308,8 @@ func CreateOrUpdateTmuxWindow(db *gorm.DB, sessionName string, windowIndex int, 
 			if err := db.Create(&window).Error; err != nil {
 				return nil, err
 			}
+			// Invalidate cache since we added a new window
+			InvalidateActiveTmuxWindowsCache()
 		} else {
 			return nil, err
 		}
@@ -271,6 +323,8 @@ func CreateOrUpdateTmuxWindow(db *gorm.DB, sessionName string, windowIndex int, 
 		if err := db.Model(&window).Updates(updates).Error; err != nil {
 			return nil, err
 		}
+		// Invalidate cache since we updated the window
+		InvalidateActiveTmuxWindowsCache()
 	}
 
 	return &window, nil
@@ -279,7 +333,9 @@ func CreateOrUpdateTmuxWindow(db *gorm.DB, sessionName string, windowIndex int, 
 // GetOrCreateWindowMessageQueue gets or creates a message queue for a window
 func GetOrCreateWindowMessageQueue(db *gorm.DB, windowID uint) (*WindowMessageQueue, error) {
 	var queue WindowMessageQueue
-	err := db.Where("window_id = ?", windowID).Preload("Window").First(&queue).Error
+	// Use silent logger for expected "record not found" during queue creation
+	err := db.Session(&gorm.Session{Logger: db.Logger.LogMode(logger.Silent)}).
+		Where("window_id = ?", windowID).Preload("Window").First(&queue).Error
 
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
@@ -293,7 +349,7 @@ func GetOrCreateWindowMessageQueue(db *gorm.DB, windowID uint) (*WindowMessageQu
 			if err := db.Create(&queue).Error; err != nil {
 				return nil, err
 			}
-			// Reload with preloaded window
+			// Reload with preloaded window (no need for silent logger here since record should exist)
 			err = db.Where("window_id = ?", windowID).Preload("Window").First(&queue).Error
 			if err != nil {
 				return nil, err

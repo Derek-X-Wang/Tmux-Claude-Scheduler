@@ -1,12 +1,15 @@
 package tmux
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/derekxwang/tcs/internal/utils"
 )
 
 // Client provides tmux functionality using shell commands
@@ -259,25 +262,7 @@ func (c *Client) DiscoverClaudeSessions() ([]WindowInfo, error) {
 
 // isClaudeWindow checks if window content indicates a Claude session
 func (c *Client) isClaudeWindow(content string) bool {
-	claudeIndicators := []string{
-		"claude",
-		"Claude",
-		"anthropic",
-		"Assistant:",
-		"Human:",
-		"I'm Claude",
-		"claude-3",
-		"I'm an AI assistant",
-	}
-
-	contentLower := strings.ToLower(content)
-	for _, indicator := range claudeIndicators {
-		if strings.Contains(contentLower, strings.ToLower(indicator)) {
-			return true
-		}
-	}
-
-	return false
+	return utils.IsClaudeWindow(content)
 }
 
 // MonitorWindow monitors a window for changes and returns a channel of updates
@@ -353,6 +338,123 @@ func (c *Client) KillSession(sessionName string) error {
 	}
 
 	return nil
+}
+
+// DetectClaudeProcess checks if Claude Code process is running in the specified tmux pane
+func (c *Client) DetectClaudeProcess(target string) (bool, error) {
+	return c.DetectClaudeProcessWithNames(target, []string{"claude-code", "claude_code", "claude"})
+}
+
+// DetectClaudeProcessWithNames checks if any of the specified process names is running in the tmux pane
+func (c *Client) DetectClaudeProcessWithNames(target string, processNames []string) (bool, error) {
+	if err := c.ValidateTarget(target); err != nil {
+		return false, err
+	}
+
+	// Get the PID of the tmux pane
+	cmd := exec.Command("tmux", "list-panes", "-t", target, "-F", "#{pane_pid}")
+	output, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("failed to get pane PID: %w", err)
+	}
+
+	panePID := strings.TrimSpace(string(output))
+	if panePID == "" {
+		return false, fmt.Errorf("no pane PID found")
+	}
+
+	// Check for the specified processes
+	for _, processName := range processNames {
+		// Check if the process is running under this pane's process tree
+		cmd = exec.Command("pgrep", "-f", processName)
+		output, err = cmd.Output()
+		if err != nil {
+			continue // Process not found, try next
+		}
+
+		pids := strings.Split(strings.TrimSpace(string(output)), "\n")
+		for _, pid := range pids {
+			if pid == "" {
+				continue
+			}
+
+			// Check if this PID is related to our tmux pane
+			// We'll check if the process or its parent is related to tmux
+			if c.isProcessRelatedToPane(pid, panePID) {
+				return true, nil
+			}
+		}
+	}
+
+	return false, nil
+}
+
+// isProcessRelatedToPane checks if a process is related to the tmux pane
+// Enhanced with cycle detection, timeout, and better error handling
+func (c *Client) isProcessRelatedToPane(processPID, panePID string) bool {
+	if processPID == "" || panePID == "" {
+		return false
+	}
+
+	// Validate input PIDs are numeric
+	if _, err := strconv.Atoi(processPID); err != nil {
+		return false
+	}
+	if _, err := strconv.Atoi(panePID); err != nil {
+		return false
+	}
+
+	currentPID := processPID
+	visitedPIDs := make(map[string]bool) // Cycle detection
+
+	// Create a timeout context (5 seconds should be more than enough)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Walk up the process tree to find if panePID is an ancestor
+	for i := 0; i < 50; i++ { // Increased limit but with cycle detection
+		// Check for timeout
+		select {
+		case <-ctx.Done():
+			log.Printf("Warning: Process tree traversal timed out for PID %s", processPID)
+			return false
+		default:
+		}
+
+		if currentPID == panePID {
+			return true
+		}
+
+		// Check for cycles
+		if visitedPIDs[currentPID] {
+			log.Printf("Warning: Cycle detected in process tree at PID %s", currentPID)
+			return false
+		}
+		visitedPIDs[currentPID] = true
+
+		// Get parent PID with timeout
+		cmd := exec.CommandContext(ctx, "ps", "-o", "ppid=", "-p", currentPID)
+		output, err := cmd.Output()
+		if err != nil {
+			// Process might have died or we don't have permission
+			break
+		}
+
+		ppid := strings.TrimSpace(string(output))
+		if ppid == "" || ppid == "0" || ppid == "1" {
+			break // Reached top of process tree
+		}
+
+		// Validate parent PID is numeric
+		if _, err := strconv.Atoi(ppid); err != nil {
+			log.Printf("Warning: Invalid parent PID format: %s", ppid)
+			break
+		}
+
+		currentPID = ppid
+	}
+
+	return false
 }
 
 // GetServerInfo returns information about the tmux server

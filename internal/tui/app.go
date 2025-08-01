@@ -3,12 +3,17 @@ package tui
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"golang.org/x/term"
 	"gorm.io/gorm"
 
 	"github.com/derekxwang/tcs/internal/config"
@@ -180,39 +185,45 @@ func NewApp(db *gorm.DB, tmuxClient *tmux.Client, usageMonitor *monitor.UsageMon
 
 // Init initializes the TUI application
 func (a *App) Init() tea.Cmd {
-	// Start refresh ticker
-	cfg := config.Get()
-	refreshRate := cfg.TUI.RefreshRate
-	if refreshRate > 0 {
-		a.ticker = time.NewTicker(refreshRate)
+	var cmds []tea.Cmd
 
-		// Start ticker goroutine
-		go func() {
-			for {
-				select {
-				case <-a.ctx.Done():
-					return
-				case t := <-a.ticker.C:
-					// Send tick message to the program
-					go func() {
-						// Note: In a real implementation, you'd send this through the program
-						// For now, we'll handle periodic updates in Update()
-						_ = t
-					}()
+	// Initialize views
+	cmds = append(cmds, a.dashboard.Init())
+	cmds = append(cmds, a.windows.Init())
+	cmds = append(cmds, a.messages.Init())
+	cmds = append(cmds, a.schedulerView.Init())
+
+	// Start refresh ticker
+	if os.Getenv("TCS_DISABLE_TICKER") != "1" {
+		cfg := config.Get()
+		refreshRate := cfg.TUI.RefreshRate
+		if refreshRate > 0 {
+			a.ticker = time.NewTicker(refreshRate)
+
+			// Start ticker goroutine
+			go func() {
+				defer a.ticker.Stop()
+				for {
+					select {
+					case <-a.ctx.Done():
+						return
+					case <-a.ticker.C:
+						// Tick handled via Update() method, no additional goroutine needed
+						// The tick messages are sent via the tea.Tick command in the return statement
+					}
 				}
-			}
-		}()
+			}()
+		}
+
+		cmds = append(cmds, tea.Tick(time.Second, func(t time.Time) tea.Msg {
+			return TickMsg(t)
+		}))
+		log.Printf("TUI ticker: ENABLED")
+	} else {
+		log.Printf("TUI ticker: DISABLED (TCS_DISABLE_TICKER=1)")
 	}
 
-	return tea.Batch(
-		a.dashboard.Init(),
-		a.windows.Init(),
-		a.messages.Init(),
-		a.schedulerView.Init(),
-		tea.Tick(time.Second, func(t time.Time) tea.Msg {
-			return TickMsg(t)
-		}),
-	)
+	return tea.Batch(cmds...)
 }
 
 // Update handles messages and updates the application state
@@ -260,12 +271,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case TickMsg:
 		// Periodic refresh
-		cmds = append(cmds, func() tea.Msg {
-			return RefreshMsg{}
-		})
-		cmds = append(cmds, tea.Tick(time.Second, func(t time.Time) tea.Msg {
-			return TickMsg(t)
-		}))
+		if os.Getenv("TCS_DISABLE_TICKER") != "1" {
+			cmds = append(cmds, func() tea.Msg {
+				return RefreshMsg{}
+			})
+			cmds = append(cmds, tea.Tick(time.Second, func(t time.Time) tea.Msg {
+				return TickMsg(t)
+			}))
+		}
 
 	case RefreshMsg:
 		// Refresh all views
@@ -301,8 +314,15 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the current view
 func (a *App) View() string {
-	if a.width == 0 {
-		return "Loading..."
+	if a.width == 0 || a.height == 0 {
+		// Fallback size if terminal dimensions aren't detected
+		a.width = 120
+		a.height = 30
+		// Update views with fallback size
+		a.dashboard.SetSize(a.width, a.height-4)
+		a.windows.SetSize(a.width, a.height-4)
+		a.messages.SetSize(a.width, a.height-4)
+		a.schedulerView.SetSize(a.width, a.height-4)
 	}
 
 	// Header
@@ -376,10 +396,123 @@ func (a *App) cleanup() {
 	if a.cancel != nil {
 		a.cancel()
 	}
+	// Note: Scheduler cleanup is handled by defer in Run() function
+	// to ensure it's stopped regardless of how the TUI exits
+}
+
+// logRedirection holds the original log output for restoration
+var originalLogOutput io.Writer
+
+// redirectLogsToFile redirects all log output to a file during TUI mode
+func redirectLogsToFile() (*os.File, error) {
+	// Save original log output
+	originalLogOutput = log.Writer()
+
+	// Create logs directory if it doesn't exist
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	tcsDir := filepath.Join(homeDir, ".tcs")
+	if err := os.MkdirAll(tcsDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create .tcs directory: %w", err)
+	}
+
+	// Create log file
+	logFile := filepath.Join(tcsDir, "tui.log")
+	file, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create log file: %w", err)
+	}
+
+	// Redirect log output to file
+	log.SetOutput(file)
+
+	// Write a separator to indicate new TUI session
+	log.Printf("=== TUI Session Started at %s ===", time.Now().Format(time.RFC3339))
+
+	return file, nil
+}
+
+// restoreLogOutput restores the original log output
+func restoreLogOutput() {
+	if originalLogOutput != nil {
+		log.SetOutput(originalLogOutput)
+	}
+}
+
+// cleanupTerminal restores the terminal to its normal state
+func cleanupTerminal() {
+	// Comprehensive terminal cleanup sequences
+	sequences := []string{
+		"\033[?1000l", // Disable X10 mouse mode
+		"\033[?1002l", // Disable button event tracking
+		"\033[?1003l", // Disable any-event tracking
+		"\033[?1006l", // Disable SGR extended mode
+		"\033[?1015l", // Disable urxvt mouse mode
+		"\033[?1005l", // Disable UTF-8 mouse mode
+		"\033[?47l",   // Disable alternate screen (backup method)
+		"\033[?1049l", // Exit alternate screen (primary method)
+		"\033[?2004l", // Disable bracketed paste mode
+		"\033[?25h",   // Show cursor
+		"\033[0m",     // Reset all text attributes
+		"\033[H",      // Move cursor to home position
+		"\033[2J",     // Clear entire screen
+	}
+
+	// Apply all sequences
+	for _, seq := range sequences {
+		fmt.Print(seq)
+	}
+
+	// Force flush to all outputs
+	os.Stdout.Sync()
+	os.Stderr.Sync()
+
+	// Nuclear option: reset terminal state via stty (ignore errors)
+	cmd := exec.Command("stty", "sane")
+	_ = cmd.Run() // Ignore any errors from stty
 }
 
 // Run starts the TUI application
 func Run() error {
+	// Ensure config is loaded (safety check for nil pointer dereference)
+	if config.Get() == nil {
+		_, err := config.Load("")
+		if err != nil {
+			log.Printf("Warning: failed to load config, using defaults: %v", err)
+		}
+	}
+
+	// Redirect logs to file to prevent TUI interference
+	logFile, err := redirectLogsToFile()
+	if err != nil {
+		return fmt.Errorf("failed to redirect logs: %w", err)
+	}
+	defer func() {
+		// Recover from any panics and restore terminal state
+		if r := recover(); r != nil {
+			// Restore terminal to normal state
+			cleanupTerminal()
+
+			restoreLogOutput()
+			if logFile != nil {
+				logFile.Close()
+			}
+
+			log.Printf("TUI crashed with panic: %v", r)
+			fmt.Fprintf(os.Stderr, "\nTUI crashed. Check ~/.tcs/tui.log for details.\n")
+			fmt.Fprintf(os.Stderr, "Terminal state has been restored.\n")
+			panic(r) // Re-panic to show stack trace
+		}
+
+		restoreLogOutput()
+		if logFile != nil {
+			logFile.Close()
+		}
+	}()
+
 	// Initialize database
 	if err := database.Initialize(nil); err != nil {
 		return fmt.Errorf("failed to initialize database: %w", err)
@@ -394,15 +527,21 @@ func Run() error {
 	}
 
 	// Create window discovery service
-	windowDiscovery := discovery.NewWindowDiscovery(database.GetDB(), tmuxClient, nil)
-	if err := windowDiscovery.Start(); err != nil {
-		return fmt.Errorf("failed to start window discovery: %w", err)
-	}
-	defer func() {
-		if err := windowDiscovery.Stop(); err != nil {
-			log.Printf("Warning: failed to stop window discovery: %v", err)
+	var windowDiscovery *discovery.WindowDiscovery
+	if os.Getenv("TCS_DISABLE_WINDOW_DISCOVERY") != "1" {
+		windowDiscovery = discovery.NewWindowDiscovery(database.GetDB(), tmuxClient, nil)
+		if err := windowDiscovery.Start(); err != nil {
+			return fmt.Errorf("failed to start window discovery: %w", err)
 		}
-	}()
+		defer func() {
+			if err := windowDiscovery.Stop(); err != nil {
+				log.Printf("Warning: failed to stop window discovery: %v", err)
+			}
+		}()
+		log.Printf("Window discovery service: ENABLED")
+	} else {
+		log.Printf("Window discovery service: DISABLED (TCS_DISABLE_WINDOW_DISCOVERY=1)")
+	}
 
 	schedulerInstance := scheduler.NewScheduler(
 		database.GetDB(),
@@ -414,13 +553,47 @@ func Run() error {
 		return fmt.Errorf("failed to initialize scheduler: %w", err)
 	}
 
+	// Start the scheduler to process messages
+	if os.Getenv("TCS_DISABLE_SCHEDULER") != "1" {
+		if err := schedulerInstance.Start(); err != nil {
+			return fmt.Errorf("failed to start scheduler: %w", err)
+		}
+		defer func() {
+			if err := schedulerInstance.Stop(); err != nil {
+				log.Printf("Warning: failed to stop scheduler: %v", err)
+			}
+		}()
+		log.Printf("Scheduler service: ENABLED")
+	} else {
+		log.Printf("Scheduler service: DISABLED (TCS_DISABLE_SCHEDULER=1)")
+	}
+
 	// Create and run TUI app
 	app := NewApp(database.GetDB(), tmuxClient, usageMonitor, windowDiscovery, schedulerInstance)
 
-	p := tea.NewProgram(app, tea.WithAltScreen())
+	// Try to get terminal size manually and set it
+	if width, height, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
+		app.width = width
+		app.height = height
+		// Update views with initial size
+		app.dashboard.SetSize(width, height-4)
+		app.windows.SetSize(width, height-4)
+		app.messages.SetSize(width, height-4)
+		app.schedulerView.SetSize(width, height-4)
+	}
+
+	p := tea.NewProgram(app,
+		tea.WithAltScreen(),
+		tea.WithInput(os.Stdin),
+		tea.WithOutput(os.Stderr),
+	)
 	if _, err := p.Run(); err != nil {
+		cleanupTerminal()
 		return fmt.Errorf("failed to run TUI: %w", err)
 	}
+
+	// Clean up terminal on normal exit
+	cleanupTerminal()
 
 	return nil
 }
