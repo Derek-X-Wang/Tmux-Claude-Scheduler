@@ -237,23 +237,26 @@ func (um *UsageMonitor) createNewWindow() error {
 // GetCurrentStats returns current usage statistics using real Claude data
 func (um *UsageMonitor) GetCurrentStats() (*UsageStats, error) {
 	um.mu.Lock()
-	defer um.mu.Unlock()
 
 	// Check if calculation is already in progress and return cached stats if fresh
 	if um.statsInProgress {
 		if um.cachedStats != nil && time.Since(um.cacheTime) < 2*time.Second {
-			return um.cachedStats, nil
+			cachedCopy := *um.cachedStats
+			um.mu.Unlock()
+			return &cachedCopy, nil
 		}
 		// Cache too old, return error to avoid blocking
+		um.mu.Unlock()
 		return nil, fmt.Errorf("stats calculation in progress")
 	}
 
-	// Mark calculation as in progress
+	// Mark calculation as in progress while holding the lock
 	um.statsInProgress = true
-	defer func() {
-		um.statsInProgress = false
-	}()
+
+	// Check if we have a current window
 	if um.currentWindow == nil {
+		um.statsInProgress = false
+		um.mu.Unlock()
 		return nil, fmt.Errorf("no current window available")
 	}
 
@@ -394,6 +397,10 @@ func (um *UsageMonitor) GetCurrentStats() (*UsageStats, error) {
 	// Cache the stats for concurrent requests
 	um.cachedStats = stats
 	um.cacheTime = time.Now()
+
+	// Clear the in-progress flag before returning
+	um.statsInProgress = false
+	um.mu.Unlock()
 
 	return stats, nil
 }

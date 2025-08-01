@@ -86,9 +86,11 @@ type TmuxConfig struct {
 
 // ClaudeConfig holds Claude data processing configuration
 type ClaudeConfig struct {
-	DataDirectory     string        `mapstructure:"data_directory" json:"data_directory"`         // Override default ~/.claude directory
-	MaxFileSize       int64         `mapstructure:"max_file_size" json:"max_file_size"`           // Maximum file size in bytes (default: 52428800 = 50MB)
-	ProcessingTimeout time.Duration `mapstructure:"processing_timeout" json:"processing_timeout"` // Timeout for processing files (default: 30s)
+	DataDirectory      string        `mapstructure:"data_directory" json:"data_directory"`               // Override default ~/.claude directory
+	MaxFileSize        int64         `mapstructure:"max_file_size" json:"max_file_size"`                 // Maximum file size in bytes (default: 52428800 = 50MB)
+	MaxEntriesPerFile  int           `mapstructure:"max_entries_per_file" json:"max_entries_per_file"`   // Maximum entries to process per file (default: 100000)
+	MaxEntriesInMemory int           `mapstructure:"max_entries_in_memory" json:"max_entries_in_memory"` // Maximum valid entries to keep in memory (default: 50000)
+	ProcessingTimeout  time.Duration `mapstructure:"processing_timeout" json:"processing_timeout"`       // Timeout for processing files (default: 30s)
 }
 
 // global configuration instance
@@ -189,6 +191,8 @@ func setDefaults(v *viper.Viper) {
 	// Claude data processing defaults
 	v.SetDefault("claude.data_directory", "")             // Empty means use default ~/.claude
 	v.SetDefault("claude.max_file_size", int64(52428800)) // 50MB in bytes
+	v.SetDefault("claude.max_entries_per_file", 100000)   // Maximum entries to process per file
+	v.SetDefault("claude.max_entries_in_memory", 50000)   // Maximum valid entries to keep in memory
 	v.SetDefault("claude.processing_timeout", 30*time.Second)
 }
 

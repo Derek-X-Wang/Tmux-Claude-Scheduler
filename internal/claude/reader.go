@@ -366,12 +366,35 @@ func (r *ClaudeDataReader) processJSONLFile(filePath string, cutoffTime *time.Ti
 	var entries []UsageEntry
 	decoder := json.NewDecoder(file)
 
+	// Get limits from config with defaults
+	maxEntriesPerFile := 100000
+	maxEntriesInMemory := 50000
+	if cfg != nil {
+		if cfg.Claude.MaxEntriesPerFile > 0 {
+			maxEntriesPerFile = cfg.Claude.MaxEntriesPerFile
+		}
+		if cfg.Claude.MaxEntriesInMemory > 0 {
+			maxEntriesInMemory = cfg.Claude.MaxEntriesInMemory
+		}
+	}
+
+	// Add protection against excessive memory usage
+	entriesProcessed := 0
+
 	for decoder.More() {
+		// Check if we've processed too many entries
+		if entriesProcessed >= maxEntriesPerFile {
+			log.Printf("Warning: Reached maximum entries limit (%d) for file %s, stopping processing",
+				maxEntriesPerFile, filePath)
+			break
+		}
+
 		var rawEntry map[string]interface{}
 		if err := decoder.Decode(&rawEntry); err != nil {
 			log.Printf("Warning: failed to decode JSON line in %s: %v", filePath, err)
 			continue
 		}
+		entriesProcessed++
 
 		entry, err := r.parseUsageEntry(rawEntry)
 		if err != nil {
@@ -391,6 +414,13 @@ func (r *ClaudeDataReader) processJSONLFile(filePath string, cutoffTime *time.Ti
 		processedIDs[entryID] = true
 
 		entries = append(entries, *entry)
+
+		// Additional check: limit valid entries stored in memory
+		if len(entries) >= maxEntriesInMemory {
+			log.Printf("Warning: Reached maximum valid entries limit (%d) for file %s",
+				maxEntriesInMemory, filePath)
+			break
+		}
 	}
 
 	return entries, nil
