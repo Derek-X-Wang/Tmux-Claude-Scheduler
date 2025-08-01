@@ -242,6 +242,12 @@ func (s *Scheduler) Update(msg tea.Msg) (*Scheduler, tea.Cmd) {
 		if msg.Type == "all" || msg.Type == "scheduler" || msg.Type == "messages" {
 			cmds = append(cmds, s.refreshData())
 		}
+
+	case types.SuccessMsg:
+		// After successful operations, trigger a refresh
+		if msg.Title == "Message Scheduled" || msg.Title == "Message Deleted" || msg.Title == "Message Updated" || msg.Title == "Message Canceled" {
+			cmds = append(cmds, s.refreshData())
+		}
 	}
 
 	// Update tables
@@ -697,11 +703,7 @@ func (s *Scheduler) scheduleMessage(sessionName, content string, priority int, w
 			return types.ErrorMsg{Title: "Failed to schedule message", Message: err.Error()}
 		}
 
-		// Refresh data after scheduling
-		go func() {
-			time.Sleep(100 * time.Millisecond)
-			s.refreshMessages()
-		}()
+		// Data will refresh via SuccessMsg handling
 
 		return types.SuccessMsg{
 			Title:   "Message Scheduled",
@@ -722,11 +724,7 @@ func (s *Scheduler) deleteMessage(id uint) tea.Cmd {
 			return types.ErrorMsg{Title: "Failed to delete message", Message: err.Error()}
 		}
 
-		// Refresh data after deletion
-		go func() {
-			time.Sleep(100 * time.Millisecond)
-			s.refreshMessages()
-		}()
+		// Data will refresh via SuccessMsg handling
 
 		return types.SuccessMsg{
 			Title:   "Message Deleted",
@@ -745,11 +743,7 @@ func (s *Scheduler) sendMessageNow(id uint) tea.Cmd {
 				Update("scheduled_time", time.Now())
 		}
 
-		// Refresh data
-		go func() {
-			time.Sleep(100 * time.Millisecond)
-			s.refreshMessages()
-		}()
+		// Data will refresh via SuccessMsg handling
 
 		return types.SuccessMsg{
 			Title:   "Message Updated",
@@ -767,11 +761,7 @@ func (s *Scheduler) cancelMessage(id uint) tea.Cmd {
 				Update("status", "canceled")
 		}
 
-		// Refresh data
-		go func() {
-			time.Sleep(100 * time.Millisecond)
-			s.refreshMessages()
-		}()
+		// Data will refresh via SuccessMsg handling
 
 		return types.SuccessMsg{
 			Title:   "Message Canceled",

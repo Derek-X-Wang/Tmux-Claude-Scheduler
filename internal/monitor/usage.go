@@ -23,8 +23,10 @@ type UsageMonitor struct {
 	lastWindowCheck time.Time
 	usageCallbacks  []func(*UsageStats)
 	windowCallbacks []func(*database.UsageWindow)
-	maxMessages     int // Maximum messages per 5-hour window
-	maxTokens       int // Maximum tokens per 5-hour window (if available)
+	maxMessages     int     // Maximum messages per 5-hour window
+	maxTokens       int     // Maximum tokens per 5-hour window (if available)
+	maxCost         float64 // Maximum cost per 5-hour window
+	dynamicLimits   bool    // Whether to use dynamic P90-based limits
 
 	// Stats calculation state (protected by mu)
 	statsInProgress bool
@@ -37,6 +39,7 @@ type UsageStats struct {
 	CurrentWindow   *database.UsageWindow `json:"current_window"`
 	MessagesUsed    int                   `json:"messages_used"`
 	TokensUsed      int                   `json:"tokens_used"`
+	CostUsed        float64               `json:"cost_used"`
 	WindowsActive   int                   `json:"windows_active"`
 	TimeRemaining   time.Duration         `json:"time_remaining"`
 	UsagePercentage float64               `json:"usage_percentage"`
@@ -45,6 +48,10 @@ type UsageStats struct {
 	WindowEndTime   time.Time             `json:"window_end_time"`
 	LastActivity    *time.Time            `json:"last_activity"`
 	EstimatedReset  time.Time             `json:"estimated_reset"`
+	MessageLimit    int                   `json:"message_limit"`
+	TokenLimit      int                   `json:"token_limit"`
+	CostLimit       float64               `json:"cost_limit"`
+	DynamicLimits   bool                  `json:"dynamic_limits"`
 }
 
 // NewUsageMonitor creates a new usage monitor
@@ -53,8 +60,10 @@ func NewUsageMonitor(db *gorm.DB) *UsageMonitor {
 		db:              db,
 		claudeReader:    claude.NewClaudeDataReader(),
 		lastWindowCheck: time.Now(),
-		maxMessages:     1000,   // Default limit, should be configurable
-		maxTokens:       100000, // Default limit, should be configurable
+		maxMessages:     1000,   // Default limit, overridden by dynamic limits
+		maxTokens:       100000, // Default limit, overridden by dynamic limits
+		maxCost:         50.0,   // Default cost limit, overridden by dynamic limits
+		dynamicLimits:   true,   // Enable P90-based dynamic limits by default
 	}
 }
 
@@ -63,28 +72,47 @@ func (um *UsageMonitor) Initialize() error {
 	um.mu.Lock()
 	defer um.mu.Unlock()
 
+	// Update limits with dynamic P90-based calculations if enabled
+	if um.dynamicLimits {
+		if err := um.updateDynamicLimits(); err != nil {
+			log.Printf("Warning: Failed to update dynamic limits, using defaults: %v", err)
+		}
+	}
+
 	// Load or create current usage window
 	if err := um.loadCurrentWindow(); err != nil {
 		return fmt.Errorf("failed to load current window: %w", err)
 	}
 
-	log.Printf("Usage monitor initialized with window: %v to %v",
-		um.currentWindow.StartTime, um.currentWindow.EndTime)
+	log.Printf("Usage monitor initialized with window: %v to %v (limits: %d msgs, %d tokens, $%.2f)",
+		um.currentWindow.StartTime, um.currentWindow.EndTime,
+		um.maxMessages, um.maxTokens, um.maxCost)
 
 	return nil
 }
 
-// loadCurrentWindow loads the current active usage window based on Claude's reset schedule
-func (um *UsageMonitor) loadCurrentWindow() error {
-	// Get configuration for reset hour
-	cfg := config.Get()
-	resetHour := 11 // default
-	if cfg != nil {
-		resetHour = cfg.Usage.ClaudeResetHour
+// updateDynamicLimits updates usage limits based on historical P90 calculations
+func (um *UsageMonitor) updateDynamicLimits() error {
+	messageLimit, tokenLimit, costLimit, err := um.claudeReader.GetDynamicLimits()
+	if err != nil {
+		return fmt.Errorf("failed to get dynamic limits: %w", err)
 	}
 
-	// Get actual Claude usage data for current window
-	_, windowStart, windowEnd, err := um.claudeReader.GetCurrentWindowEntries(resetHour)
+	// Update the limits
+	um.maxMessages = messageLimit
+	um.maxTokens = tokenLimit
+	um.maxCost = costLimit
+
+	log.Printf("Updated dynamic limits: %d messages, %d tokens, $%.2f cost (P90-based)",
+		messageLimit, tokenLimit, costLimit)
+
+	return nil
+}
+
+// loadCurrentWindow loads the current active usage window (dynamic 5-hour windows)
+func (um *UsageMonitor) loadCurrentWindow() error {
+	// Try to get active Claude session from actual data
+	_, windowStart, windowEnd, err := um.claudeReader.GetCurrentWindowEntries(0)
 	if err != nil {
 		log.Printf("Warning: Could not read Claude data: %v", err)
 		// Fallback to database window if Claude data unavailable
@@ -98,8 +126,8 @@ func (um *UsageMonitor) loadCurrentWindow() error {
 		Where("start_time = ? AND end_time = ?", windowStart, windowEnd).First(&window).Error
 
 	if err == gorm.ErrRecordNotFound {
-		// Create new window based on Claude's schedule
-		return um.createClaudeBasedWindow(windowStart, windowEnd, resetHour)
+		// Create new window based on Claude's actual session
+		return um.createClaudeBasedWindow(windowStart, windowEnd)
 	} else if err != nil {
 		return fmt.Errorf("error querying current window: %w", err)
 	}
@@ -133,8 +161,8 @@ func (um *UsageMonitor) loadCurrentWindowFromDB() error {
 	return nil
 }
 
-// createClaudeBasedWindow creates a new window based on Claude's actual schedule
-func (um *UsageMonitor) createClaudeBasedWindow(windowStart, windowEnd time.Time, resetHour int) error {
+// createClaudeBasedWindow creates a new window based on Claude's actual session
+func (um *UsageMonitor) createClaudeBasedWindow(windowStart, windowEnd time.Time) error {
 	// Deactivate any existing windows
 	if err := um.db.Model(&database.UsageWindow{}).
 		Where("active = ?", true).
@@ -142,8 +170,8 @@ func (um *UsageMonitor) createClaudeBasedWindow(windowStart, windowEnd time.Time
 		return fmt.Errorf("failed to deactivate old windows: %w", err)
 	}
 
-	// Get actual message count from Claude data
-	messageCount, _, _, err := um.claudeReader.CountMessagesInWindow(resetHour)
+	// Get actual message count from Claude data (using dynamic window detection)
+	messageCount, _, _, err := um.claudeReader.CountMessagesInWindow(0)
 	if err != nil {
 		log.Printf("Warning: Could not get message count from Claude data: %v", err)
 		messageCount = 0 // Fallback to 0
@@ -229,33 +257,58 @@ func (um *UsageMonitor) GetCurrentStats() (*UsageStats, error) {
 		return nil, fmt.Errorf("no current window available")
 	}
 
-	// Get configuration for reset hour
+	// Get configuration
 	cfg := config.Get()
-	resetHour := 11 // default
-	if cfg != nil {
-		resetHour = cfg.Usage.ClaudeResetHour
+	if cfg != nil && !um.dynamicLimits {
+		// Only use config limits if dynamic limits are disabled
 		um.maxMessages = cfg.Usage.MaxMessages
+	} else if um.dynamicLimits {
+		// Update dynamic limits periodically (every 10 minutes)
+		if time.Since(um.lastWindowCheck) > 10*time.Minute {
+			if err := um.updateDynamicLimits(); err != nil {
+				log.Printf("Warning: Failed to update dynamic limits: %v", err)
+			}
+			um.lastWindowCheck = time.Now()
+		}
 	}
 
-	// Get real Claude usage data for current window
+	// Get real Claude usage data for current window (dynamic session detection)
 	var actualMessageCount int
+	var actualTokenCount int
+	var actualCost float64
 	var windowStart, windowEnd time.Time
 
-	messageCount, start, end, err := um.claudeReader.CountMessagesInWindow(resetHour)
+	// Get current window entries for detailed analysis
+	entries, start, end, err := um.claudeReader.GetCurrentWindowEntries(0)
 	if err != nil {
 		log.Printf("Warning: Could not get real-time Claude data: %v", err)
 		// Fallback to database values
 		actualMessageCount = um.currentWindow.TotalMessages
+		actualTokenCount = um.currentWindow.TotalTokens
+		actualCost = 0.0 // Cost calculation needs Claude data
 		windowStart = um.currentWindow.StartTime
 		windowEnd = um.currentWindow.EndTime
 	} else {
-		actualMessageCount = messageCount
+		actualMessageCount = len(entries)
 		windowStart = start
 		windowEnd = end
 
+		// Calculate tokens and estimated cost from entries
+		totalTokens := 0
+		totalCost := 0.0
+		for _, entry := range entries {
+			totalTokens += entry.InputTokens + entry.OutputTokens
+			// Estimate cost (rough approximation - $3 per million tokens for Sonnet)
+			totalCost += float64(entry.InputTokens+entry.OutputTokens) * 3.0 / 1000000.0
+		}
+		actualTokenCount = totalTokens
+		actualCost = totalCost
+
 		// Update database with real data if significantly different
-		if abs(actualMessageCount-um.currentWindow.TotalMessages) > 0 {
+		if abs(actualMessageCount-um.currentWindow.TotalMessages) > 0 ||
+			abs(actualTokenCount-um.currentWindow.TotalTokens) > 1000 {
 			um.currentWindow.TotalMessages = actualMessageCount
+			um.currentWindow.TotalTokens = actualTokenCount
 			um.currentWindow.StartTime = windowStart
 			um.currentWindow.EndTime = windowEnd
 			if err := um.db.Save(um.currentWindow).Error; err != nil {
@@ -277,10 +330,28 @@ func (um *UsageMonitor) GetCurrentStats() (*UsageStats, error) {
 	var activeWindows int64
 	um.db.Model(&database.TmuxWindow{}).Where("active = ? AND has_claude = ?", true, true).Count(&activeWindows)
 
-	// Calculate usage percentage based on messages (primary metric)
-	usagePercentage := 0.0
+	// Calculate usage percentage based on the most restrictive metric
+	messagePercentage := 0.0
+	tokenPercentage := 0.0
+	costPercentage := 0.0
+
 	if um.maxMessages > 0 {
-		usagePercentage = float64(actualMessageCount) / float64(um.maxMessages)
+		messagePercentage = float64(actualMessageCount) / float64(um.maxMessages)
+	}
+	if um.maxTokens > 0 {
+		tokenPercentage = float64(actualTokenCount) / float64(um.maxTokens)
+	}
+	if um.maxCost > 0 {
+		costPercentage = actualCost / um.maxCost
+	}
+
+	// Use the highest percentage as the primary usage metric
+	usagePercentage := messagePercentage
+	if tokenPercentage > usagePercentage {
+		usagePercentage = tokenPercentage
+	}
+	if costPercentage > usagePercentage {
+		usagePercentage = costPercentage
 	}
 
 	// Get last activity from windows
@@ -304,15 +375,20 @@ func (um *UsageMonitor) GetCurrentStats() (*UsageStats, error) {
 	stats := &UsageStats{
 		CurrentWindow:   um.currentWindow,
 		MessagesUsed:    actualMessageCount,
-		TokensUsed:      um.currentWindow.TotalTokens,
+		TokensUsed:      actualTokenCount,
+		CostUsed:        actualCost,
 		WindowsActive:   int(activeWindows),
 		TimeRemaining:   timeRemaining,
 		UsagePercentage: usagePercentage,
-		CanSendMessage:  actualMessageCount < um.maxMessages,
+		CanSendMessage:  actualMessageCount < um.maxMessages && actualTokenCount < um.maxTokens && actualCost < um.maxCost,
 		WindowStartTime: windowStart,
 		WindowEndTime:   windowEnd,
 		LastActivity:    lastActivity,
 		EstimatedReset:  windowEnd,
+		MessageLimit:    um.maxMessages,
+		TokenLimit:      um.maxTokens,
+		CostLimit:       um.maxCost,
+		DynamicLimits:   um.dynamicLimits,
 	}
 
 	// Cache the stats for concurrent requests
@@ -444,8 +520,31 @@ func (um *UsageMonitor) SetLimits(maxMessages, maxTokens int) {
 
 	um.maxMessages = maxMessages
 	um.maxTokens = maxTokens
+	um.dynamicLimits = false // Disable dynamic limits when manually setting
 
-	log.Printf("Updated usage limits: %d messages, %d tokens", maxMessages, maxTokens)
+	log.Printf("Updated usage limits: %d messages, %d tokens (dynamic limits disabled)", maxMessages, maxTokens)
+}
+
+// SetDynamicLimits enables or disables dynamic P90-based limits
+func (um *UsageMonitor) SetDynamicLimits(enabled bool) error {
+	um.mu.Lock()
+	defer um.mu.Unlock()
+
+	um.dynamicLimits = enabled
+
+	if enabled {
+		// Update limits immediately
+		if err := um.updateDynamicLimits(); err != nil {
+			return fmt.Errorf("failed to update dynamic limits: %w", err)
+		}
+		log.Printf("Dynamic P90-based limits enabled: %d messages, %d tokens, $%.2f",
+			um.maxMessages, um.maxTokens, um.maxCost)
+	} else {
+		log.Printf("Dynamic limits disabled, using static limits: %d messages, %d tokens, $%.2f",
+			um.maxMessages, um.maxTokens, um.maxCost)
+	}
+
+	return nil
 }
 
 // AddUsageCallback adds a callback for usage updates

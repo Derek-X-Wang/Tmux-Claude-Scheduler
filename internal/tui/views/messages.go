@@ -212,6 +212,12 @@ func (m *Messages) Update(msg tea.Msg) (*Messages, tea.Cmd) {
 		if msg.Type == "all" || msg.Type == "messages" {
 			cmds = append(cmds, m.refreshData())
 		}
+
+	case types.SuccessMsg:
+		// After successful operations, trigger a refresh
+		if msg.Title == "Message Created" || msg.Title == "Message Updated" || msg.Title == "Message Deleted" {
+			cmds = append(cmds, m.refreshData())
+		}
 	}
 
 	// Update table
@@ -586,11 +592,7 @@ func (m *Messages) createMessage(target, content string, priority int, scheduled
 			return types.ErrorMsg{Title: "Failed to create message", Message: err.Error()}
 		}
 
-		// Refresh data after creation
-		go func() {
-			time.Sleep(100 * time.Millisecond)
-			m.refreshMessages()
-		}()
+		// Data will refresh via SuccessMsg handling
 
 		return types.SuccessMsg{
 			Title:   "Message Created",
@@ -630,11 +632,7 @@ func (m *Messages) updateMessage(messageID uint, target, content string, priorit
 			return types.ErrorMsg{Title: "Failed to update message", Message: err.Error()}
 		}
 
-		// Refresh data after update
-		go func() {
-			time.Sleep(100 * time.Millisecond)
-			m.refreshMessages()
-		}()
+		// Data will refresh via SuccessMsg handling
 
 		return types.SuccessMsg{
 			Title:   "Message Updated",
@@ -666,11 +664,7 @@ func (m *Messages) deleteMessage(messageID uint) tea.Cmd {
 			return types.ErrorMsg{Title: "Failed to delete message", Message: err.Error()}
 		}
 
-		// Refresh data after deletion
-		go func() {
-			time.Sleep(100 * time.Millisecond)
-			m.refreshMessages()
-		}()
+		// Data will refresh via SuccessMsg handling
 
 		return types.SuccessMsg{
 			Title:   "Message Deleted",

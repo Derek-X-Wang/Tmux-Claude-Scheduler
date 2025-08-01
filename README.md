@@ -6,8 +6,8 @@ A Go CLI tool that maximizes Claude subscription usage by monitoring 5-hour usag
 
 ## Features
 
-- **Real Claude Usage Tracking**: Reads actual Claude usage data from `~/.claude` directory and aligns with Claude's 11 AM reset schedule
-- **5-Hour Usage Window Monitoring**: Automatically tracks Claude's official 5-hour usage windows with accurate timing
+- **Real Claude Usage Tracking**: Reads actual Claude usage data from `~/.claude` directory with intelligent session detection
+- **Dynamic 5-Hour Usage Window Monitoring**: Automatically detects and tracks the closest active Claude session window with precise timing
 - **One-Command Setup**: `tcs init` command handles complete setup in one go
 - **Smart Message Scheduling**: Priority-based message queue with intelligent scheduling
 - **Tmux Integration**: Send messages to Claude running in tmux sessions with proper timing
@@ -21,7 +21,7 @@ A Go CLI tool that maximizes Claude subscription usage by monitoring 5-hour usag
 - **Real-time Usage Monitoring**: Live tracking of actual message usage and time until reset
 - **Session Health Checks**: Monitor tmux session connectivity and Claude presence
 
-## 🚀 Recent Improvements (2025)
+## 🚀 Recent Improvements
 
 TCS has undergone significant security and performance enhancements based on comprehensive code review and enterprise-grade quality standards:
 
@@ -41,6 +41,7 @@ TCS has undergone significant security and performance enhancements based on com
 
 ### 🏗️ **Architectural Improvements**
 - **Window-Based Architecture**: Revolutionary shift from session-based to window-based management
+- **Intelligent Session Detection**: Dynamic algorithm finds closest active Claude session window instead of fixed schedules
 - **Enhanced Time Parsing**: Support for 6 different time formats including full date-time
 - **Robust Error Recovery**: Graceful handling of malformed data and network issues
 - **Comprehensive Testing**: 18+ unit tests with performance benchmarks and race detection
@@ -362,9 +363,10 @@ TCS underwent a major architectural revolution in 2025, transforming from sessio
 
 4. **Thread-Safe Usage Monitor** (`internal/monitor/`)
    - **Real Claude Data Integration**: Direct JSONL file processing from `~/.claude/projects`
+   - **Intelligent Session Detection**: Automatically finds the closest active 5-hour Claude session window
    - **File Size Protection**: Configurable 50MB limit prevents memory exhaustion attacks
    - **Thread-Safe Statistics**: Proper mutex-based synchronization replacing atomic operations
-   - **5-Hour Window Tracking**: Aligned with Claude's 11 AM reset schedule
+   - **Dynamic Window Tracking**: Detects current active session containing current time, not fixed schedules
    - **Live Statistics**: Real-time message and token counting with 2-second caching
    - **Error Recovery**: Graceful handling of missing or corrupted Claude data
 
@@ -654,8 +656,8 @@ GOOS=windows GOARCH=amd64 make build
 
 3. **"Cannot send messages" (usage limit)**
    - Check current usage: `tcs status`
-   - Wait for the 5-hour window to reset (shows time remaining)
-   - TCS now reads real Claude usage data for accurate limits
+   - TCS automatically detects the closest active Claude session window
+   - Shows accurate time remaining based on real Claude usage data
 
 4. **Incorrect usage statistics**
    - Ensure `~/.claude` directory exists and contains usage data

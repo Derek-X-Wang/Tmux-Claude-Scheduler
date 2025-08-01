@@ -42,6 +42,13 @@ func NewClaudeDataReader() *ClaudeDataReader {
 
 // ReadUsageEntries reads and parses Claude usage entries from JSONL files
 func (r *ClaudeDataReader) ReadUsageEntries(hoursBack int) ([]UsageEntry, error) {
+	// Debug: log that we're trying to read entries
+	debugFile, _ := os.OpenFile("/tmp/tcs-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if debugFile != nil {
+		fmt.Fprintf(debugFile, "DEBUG ReadUsageEntries: hoursBack=%d, claudeDir=%s\n", hoursBack, r.claudeDir)
+		debugFile.Close()
+	}
+
 	// Validate hoursBack parameter
 	if hoursBack < 0 {
 		return nil, fmt.Errorf("hoursBack must be non-negative, got %d", hoursBack)
@@ -51,11 +58,21 @@ func (r *ClaudeDataReader) ReadUsageEntries(hoursBack int) ([]UsageEntry, error)
 	}
 
 	if r.claudeDir == "" {
+		debugFile, _ := os.OpenFile("/tmp/tcs-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+		if debugFile != nil {
+			fmt.Fprintf(debugFile, "DEBUG ReadUsageEntries: claude directory is empty\n")
+			debugFile.Close()
+		}
 		return nil, fmt.Errorf("claude directory not available")
 	}
 
 	// Check if directory exists
 	if _, err := os.Stat(r.claudeDir); os.IsNotExist(err) {
+		debugFile, _ := os.OpenFile("/tmp/tcs-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+		if debugFile != nil {
+			fmt.Fprintf(debugFile, "DEBUG ReadUsageEntries: directory does not exist: %s\n", r.claudeDir)
+			debugFile.Close()
+		}
 		return nil, fmt.Errorf("claude data directory does not exist: %s", r.claudeDir)
 	}
 
@@ -99,18 +116,26 @@ func (r *ClaudeDataReader) ReadUsageEntries(hoursBack int) ([]UsageEntry, error)
 	return allEntries, nil
 }
 
-// GetCurrentWindowEntries gets entries for the current 5-hour window based on reset time
+// GetCurrentWindowEntries gets entries for the current dynamic 5-hour session
 func (r *ClaudeDataReader) GetCurrentWindowEntries(resetHour int) ([]UsageEntry, time.Time, time.Time, error) {
-	// Get all entries from last 24 hours to ensure we capture the current window
-	entries, err := r.ReadUsageEntries(24)
+	// Get all entries from last 72 hours to find current session (spans across multiple days)
+	// This ensures we capture the 7:00 AM session from yesterday morning
+	entries, err := r.ReadUsageEntries(72)
 	if err != nil {
 		return nil, time.Time{}, time.Time{}, err
 	}
 
-	// Calculate current window based on reset time
-	windowStart, windowEnd := r.calculateCurrentWindow(resetHour)
+	if len(entries) == 0 {
+		// No entries - create a potential window starting now
+		now := time.Now()
+		return []UsageEntry{}, now, now.Add(5 * time.Hour), nil
+	}
 
-	// Filter entries for current window
+	// Find the current active session using dynamic detection
+	windowStart, windowEnd := r.findCurrentSession(entries)
+
+	// Filter entries for current session - include ALL entries within the session window
+	// regardless of gaps in activity
 	var windowEntries []UsageEntry
 	for _, entry := range entries {
 		if (entry.Timestamp.Equal(windowStart) || entry.Timestamp.After(windowStart)) &&
@@ -122,35 +147,174 @@ func (r *ClaudeDataReader) GetCurrentWindowEntries(resetHour int) ([]UsageEntry,
 	return windowEntries, windowStart, windowEnd, nil
 }
 
-// calculateCurrentWindow calculates the current 5-hour window based on reset hour
-func (r *ClaudeDataReader) calculateCurrentWindow(resetHour int) (time.Time, time.Time) {
-	now := time.Now()
-	today := time.Date(now.Year(), now.Month(), now.Day(), resetHour, 0, 0, 0, now.Location())
-
-	// Define the 5-hour windows based on reset time
-	windows := []time.Time{
-		today.Add(-10 * time.Hour), // 5 hours before reset
-		today.Add(-5 * time.Hour),  // 5 hours before reset
-		today,                      // Reset time
-		today.Add(5 * time.Hour),   // 5 hours after reset
-		today.Add(10 * time.Hour),  // 10 hours after reset
+// roundToHour rounds timestamp to the nearest full hour in UTC (like Claude Monitor)
+func (r *ClaudeDataReader) roundToHour(timestamp time.Time) time.Time {
+	if timestamp.IsZero() {
+		return timestamp
 	}
 
-	// If we're past the last window of today, consider tomorrow's windows
-	if now.After(windows[len(windows)-1]) {
-		tomorrow := today.Add(24 * time.Hour)
-		windows = append(windows, tomorrow, tomorrow.Add(5*time.Hour))
+	// Convert to UTC if not already
+	if timestamp.Location() != time.UTC {
+		timestamp = timestamp.UTC()
 	}
 
-	// Find current window
-	for i := 0; i < len(windows)-1; i++ {
-		if (now.Equal(windows[i]) || now.After(windows[i])) && now.Before(windows[i+1]) {
-			return windows[i], windows[i+1]
+	// Round to the nearest hour
+	return timestamp.Truncate(time.Hour)
+}
+
+// findCurrentSession finds the current active 5-hour session from actual Claude usage data
+// This implements Claude's dynamic session logic matching Claude Monitor exactly
+// The key insight: Claude limits start from the FIRST MESSAGE of the day, not current time
+func (r *ClaudeDataReader) findCurrentSession(entries []UsageEntry) (time.Time, time.Time) {
+	if len(entries) == 0 {
+		now := time.Now().UTC()
+		sessionStart := r.roundToHour(now)
+		return sessionStart, sessionStart.Add(5 * time.Hour)
+	}
+
+	now := time.Now().UTC()
+
+	// Sort entries by timestamp (should already be sorted, but ensure it)
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Timestamp.Before(entries[j].Timestamp)
+	})
+
+	// Debug: log some information about the entries and analyze session boundaries
+	if len(entries) > 0 {
+		// Write debug info to a file we can check
+		debugFile, _ := os.OpenFile("/tmp/tcs-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+		if debugFile != nil {
+			fmt.Fprintf(debugFile, "DEBUG findCurrentSession: now=%s, first_entry=%s (%s), last_entry=%s (%s), total_entries=%d\n",
+				now.Format("2006-01-02 15:04"),
+				entries[0].Timestamp.Format("2006-01-02 15:04"), entries[0].Timestamp.Format("15:04"),
+				entries[len(entries)-1].Timestamp.Format("2006-01-02 15:04"), entries[len(entries)-1].Timestamp.Format("15:04"),
+				len(entries))
+
+			// Log time boundaries for different days to help understand the data
+			dayBoundaries := make(map[string][]time.Time)
+			for _, entry := range entries {
+				day := entry.Timestamp.Format("2006-01-02")
+				dayBoundaries[day] = append(dayBoundaries[day], entry.Timestamp)
+			}
+
+			for day, timestamps := range dayBoundaries {
+				if len(timestamps) > 0 {
+					sort.Slice(timestamps, func(i, j int) bool {
+						return timestamps[i].Before(timestamps[j])
+					})
+					fmt.Fprintf(debugFile, "DEBUG day %s: first=%s, last=%s, count=%d\n",
+						day, timestamps[0].Format("15:04"), timestamps[len(timestamps)-1].Format("15:04"), len(timestamps))
+				}
+			}
+
+			debugFile.Close()
 		}
 	}
 
-	// Fallback - should not happen but handle edge case
-	return today, today.Add(5 * time.Hour)
+	// Claude's key behavior: Find the CLOSEST session to current time
+	// This matches how Claude Monitor tracks the active 5-hour window
+
+	// Build all possible 5-hour sessions from the data
+	type session struct {
+		start        time.Time
+		end          time.Time
+		messageCount int
+		entries      []UsageEntry
+	}
+
+	sessions := make(map[string]*session)
+
+	// Group entries into 5-hour blocks based on first message in each block
+	for _, entry := range entries {
+		entryTime := entry.Timestamp.UTC()
+		roundedStart := r.roundToHour(entryTime)
+		sessionKey := roundedStart.Format("2006-01-02 15:04")
+
+		s := sessions[sessionKey]
+		if s == nil {
+			s = &session{
+				start:        roundedStart,
+				end:          roundedStart.Add(5 * time.Hour),
+				messageCount: 0,
+				entries:      []UsageEntry{},
+			}
+			sessions[sessionKey] = s
+		}
+
+		// Add entry if it falls within this session's 5-hour window
+		if (entryTime.Equal(s.start) || entryTime.After(s.start)) && entryTime.Before(s.end) {
+			s.entries = append(s.entries, entry)
+			s.messageCount++
+		}
+	}
+
+	// Find the best session:
+	// 1. First priority: Session that contains current time
+	// 2. Second priority: Most recent session that hasn't expired too long ago
+	// 3. Third priority: Next upcoming session if we're between sessions
+
+	var activeSession *session
+	var closestSession *session
+	var minTimeDiff time.Duration
+
+	for _, s := range sessions {
+		// Check if current time is within this session
+		if (now.Equal(s.start) || now.After(s.start)) && now.Before(s.end) {
+			activeSession = s
+			debugFile, _ := os.OpenFile("/tmp/tcs-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+			if debugFile != nil {
+				fmt.Fprintf(debugFile, "DEBUG found active session containing current time: %s - %s (%d messages)\n",
+					s.start.Format("15:04"), s.end.Format("15:04"), s.messageCount)
+				debugFile.Close()
+			}
+			break
+		}
+
+		// Calculate how close this session is to current time
+		var timeDiff time.Duration
+		if now.Before(s.start) {
+			// Future session
+			timeDiff = s.start.Sub(now)
+		} else if now.After(s.end) {
+			// Past session
+			timeDiff = now.Sub(s.end)
+		} else {
+			// Current time is within session
+			timeDiff = 0
+		}
+
+		// Track closest session with significant activity (>50 messages)
+		if s.messageCount > 50 && (closestSession == nil || timeDiff < minTimeDiff) {
+			closestSession = s
+			minTimeDiff = timeDiff
+		}
+	}
+
+	// Use active session if found
+	if activeSession != nil {
+		return activeSession.start, activeSession.end
+	}
+
+	// Use closest session if it's within reasonable time (last 12 hours)
+	if closestSession != nil && minTimeDiff < 12*time.Hour {
+		debugFile, _ := os.OpenFile("/tmp/tcs-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+		if debugFile != nil {
+			fmt.Fprintf(debugFile, "DEBUG using closest session (%.1f hours away): %s - %s (%d messages)\n",
+				minTimeDiff.Hours(), closestSession.start.Format("15:04"), closestSession.end.Format("15:04"), closestSession.messageCount)
+			debugFile.Close()
+		}
+		return closestSession.start, closestSession.end
+	}
+
+	// If no good session found, create a new one starting now
+	newStart := r.roundToHour(now)
+	debugFile, _ := os.OpenFile("/tmp/tcs-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if debugFile != nil {
+		fmt.Fprintf(debugFile, "DEBUG creating new session starting now: %s - %s\n",
+			newStart.Format("15:04"), newStart.Add(5*time.Hour).Format("15:04"))
+		debugFile.Close()
+	}
+	return newStart, newStart.Add(5 * time.Hour)
 }
 
 // findJSONLFiles finds all JSONL files in the Claude directory
@@ -306,7 +470,7 @@ func (r *ClaudeDataReader) extractStringField(data map[string]interface{}, field
 	return ""
 }
 
-// CountMessagesInWindow counts the number of messages in the current window
+// CountMessagesInWindow counts the number of messages in the current dynamic session
 func (r *ClaudeDataReader) CountMessagesInWindow(resetHour int) (int, time.Time, time.Time, error) {
 	entries, windowStart, windowEnd, err := r.GetCurrentWindowEntries(resetHour)
 	if err != nil {
@@ -314,4 +478,201 @@ func (r *ClaudeDataReader) CountMessagesInWindow(resetHour int) (int, time.Time,
 	}
 
 	return len(entries), windowStart, windowEnd, nil
+}
+
+// GetDynamicLimits calculates dynamic usage limits based on historical patterns (like Claude Monitor)
+func (r *ClaudeDataReader) GetDynamicLimits() (messageLimit int, tokenLimit int, costLimit float64, err error) {
+	// Get all entries from the last 30 days to analyze usage patterns
+	entries, err := r.ReadUsageEntries(24 * 30) // 30 days
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("failed to read historical entries: %w", err)
+	}
+
+	if len(entries) < 10 {
+		// Not enough data, use conservative defaults
+		return 500, 50000, 25.0, nil
+	}
+
+	// Group entries into sessions and calculate session totals
+	sessions := r.groupEntriesIntoSessions(entries)
+
+	if len(sessions) < 3 {
+		// Not enough sessions, use conservative defaults
+		return 500, 50000, 25.0, nil
+	}
+
+	// Calculate P90 (90th percentile) limits like Claude Monitor does
+	messageLimit = r.calculateP90MessageLimit(sessions)
+	tokenLimit = r.calculateP90TokenLimit(sessions)
+	costLimit = r.calculateP90CostLimit(sessions)
+
+	// Apply minimum reasonable limits
+	if messageLimit < 100 {
+		messageLimit = 100
+	}
+	if tokenLimit < 10000 {
+		tokenLimit = 10000
+	}
+	if costLimit < 5.0 {
+		costLimit = 5.0
+	}
+
+	return messageLimit, tokenLimit, costLimit, nil
+}
+
+// SessionSummary represents aggregated data for a single 5-hour session
+type SessionSummary struct {
+	StartTime     time.Time
+	EndTime       time.Time
+	MessageCount  int
+	TotalTokens   int
+	EstimatedCost float64
+}
+
+// groupEntriesIntoSessions groups usage entries into 5-hour sessions using hour-based boundaries
+func (r *ClaudeDataReader) groupEntriesIntoSessions(entries []UsageEntry) []SessionSummary {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	var sessions []SessionSummary
+	var currentSession *SessionSummary
+
+	// Sort entries by timestamp
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Timestamp.Before(entries[j].Timestamp)
+	})
+
+	for _, entry := range entries {
+		entryTime := entry.Timestamp.UTC()
+
+		// Round entry timestamp to nearest hour (matching Claude Monitor logic)
+		roundedStart := r.roundToHour(entryTime)
+
+		// Check if we need a new session
+		if currentSession == nil {
+			// Start first session
+			currentSession = &SessionSummary{
+				StartTime:     roundedStart,
+				EndTime:       roundedStart.Add(5 * time.Hour),
+				MessageCount:  0,
+				TotalTokens:   0,
+				EstimatedCost: 0,
+			}
+		} else {
+			// Check if entry falls outside current session's time window
+			if entryTime.After(currentSession.EndTime) {
+				// Finalize previous session
+				sessions = append(sessions, *currentSession)
+
+				// Start new session from rounded hour
+				currentSession = &SessionSummary{
+					StartTime:     roundedStart,
+					EndTime:       roundedStart.Add(5 * time.Hour),
+					MessageCount:  0,
+					TotalTokens:   0,
+					EstimatedCost: 0,
+				}
+			}
+		}
+
+		// Add entry to current session
+		currentSession.MessageCount++
+		currentSession.TotalTokens += entry.InputTokens + entry.OutputTokens
+
+		// Estimate cost (rough approximation - $3 per million tokens for Sonnet)
+		tokens := entry.InputTokens + entry.OutputTokens
+		currentSession.EstimatedCost += float64(tokens) * 3.0 / 1000000.0
+	}
+
+	// Don't forget the last session
+	if currentSession != nil {
+		sessions = append(sessions, *currentSession)
+	}
+
+	return sessions
+}
+
+// calculateP90MessageLimit calculates the 90th percentile message limit
+func (r *ClaudeDataReader) calculateP90MessageLimit(sessions []SessionSummary) int {
+	if len(sessions) == 0 {
+		return 500
+	}
+
+	// Extract message counts
+	var counts []int
+	for _, session := range sessions {
+		if session.MessageCount > 0 { // Only include sessions with actual usage
+			counts = append(counts, session.MessageCount)
+		}
+	}
+
+	if len(counts) == 0 {
+		return 500
+	}
+
+	// Sort and find P90
+	sort.Ints(counts)
+	p90Index := int(float64(len(counts)) * 0.9)
+	if p90Index >= len(counts) {
+		p90Index = len(counts) - 1
+	}
+
+	// Add some buffer (Claude Monitor seems to add ~20% buffer)
+	p90Value := counts[p90Index]
+	return int(float64(p90Value) * 1.2)
+}
+
+// calculateP90TokenLimit calculates the 90th percentile token limit
+func (r *ClaudeDataReader) calculateP90TokenLimit(sessions []SessionSummary) int {
+	if len(sessions) == 0 {
+		return 50000
+	}
+
+	var counts []int
+	for _, session := range sessions {
+		if session.TotalTokens > 0 {
+			counts = append(counts, session.TotalTokens)
+		}
+	}
+
+	if len(counts) == 0 {
+		return 50000
+	}
+
+	sort.Ints(counts)
+	p90Index := int(float64(len(counts)) * 0.9)
+	if p90Index >= len(counts) {
+		p90Index = len(counts) - 1
+	}
+
+	p90Value := counts[p90Index]
+	return int(float64(p90Value) * 1.2)
+}
+
+// calculateP90CostLimit calculates the 90th percentile cost limit
+func (r *ClaudeDataReader) calculateP90CostLimit(sessions []SessionSummary) float64 {
+	if len(sessions) == 0 {
+		return 25.0
+	}
+
+	var costs []float64
+	for _, session := range sessions {
+		if session.EstimatedCost > 0 {
+			costs = append(costs, session.EstimatedCost)
+		}
+	}
+
+	if len(costs) == 0 {
+		return 25.0
+	}
+
+	sort.Float64s(costs)
+	p90Index := int(float64(len(costs)) * 0.9)
+	if p90Index >= len(costs) {
+		p90Index = len(costs) - 1
+	}
+
+	p90Value := costs[p90Index]
+	return p90Value * 1.2
 }

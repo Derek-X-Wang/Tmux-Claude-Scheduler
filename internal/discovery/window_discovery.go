@@ -216,6 +216,9 @@ func (wd *WindowDiscovery) processSessions(session tmux.SessionInfo) {
 
 // processWindow processes a single window
 func (wd *WindowDiscovery) processWindow(windowInfo tmux.WindowInfo) {
+	log.Printf("Processing window: %s (session: %s, index: %d)",
+		windowInfo.Target, windowInfo.SessionName, windowInfo.WindowIndex)
+
 	// Detect if window has Claude (if enabled)
 	hasClaude := false
 	if wd.config.ClaudeDetection {
@@ -255,14 +258,19 @@ func (wd *WindowDiscovery) processWindow(windowInfo tmux.WindowInfo) {
 			wd.mu.Lock()
 			wd.stats.ClaudeWindowsFound++
 			wd.mu.Unlock()
+			log.Printf("Window %s detected as Claude window", windowInfo.Target)
+		} else {
+			log.Printf("Window %s does NOT have Claude detected", windowInfo.Target)
 		}
 	}
 
 	if !wd.config.PersistDiscovered {
+		log.Printf("Not persisting window %s (PersistDiscovered=false)", windowInfo.Target)
 		return // Don't persist to database
 	}
 
 	// Create or update window in database
+	log.Printf("Saving window %s to database", windowInfo.Target)
 	dbWindow, err := database.CreateOrUpdateTmuxWindow(
 		wd.db,
 		windowInfo.SessionName,
@@ -271,9 +279,11 @@ func (wd *WindowDiscovery) processWindow(windowInfo tmux.WindowInfo) {
 		hasClaude,
 	)
 	if err != nil {
+		log.Printf("ERROR: Failed to save window %s: %v", windowInfo.Target, err)
 		wd.emitError(fmt.Errorf("failed to create/update window %s: %w", windowInfo.Target, err))
 		return
 	}
+	log.Printf("Successfully saved window %s to database (ID: %d)", windowInfo.Target, dbWindow.ID)
 
 	// Check if this is a newly discovered window
 	isNewWindow := dbWindow.CreatedAt.After(time.Now().Add(-wd.config.ScanInterval * 2))

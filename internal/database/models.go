@@ -274,6 +274,15 @@ func InvalidateActiveTmuxWindowsCache() {
 	activeTmuxWindowsCacheMutex.Unlock()
 }
 
+// GetAllActiveTmuxWindows returns all active tmux windows (regardless of Claude status)
+func GetAllActiveTmuxWindows(db *gorm.DB) ([]TmuxWindow, error) {
+	var windows []TmuxWindow
+	err := db.Where("active = ?", true).
+		Order("session_name ASC, window_index ASC").
+		Find(&windows).Error
+	return windows, err
+}
+
 // CreateOrUpdateTmuxWindow creates or updates a tmux window entry
 func CreateOrUpdateTmuxWindow(db *gorm.DB, sessionName string, windowIndex int, windowName string, hasClaude bool) (*TmuxWindow, error) {
 	target := fmt.Sprintf("%s:%d", sessionName, windowIndex)
@@ -324,7 +333,9 @@ func CreateOrUpdateTmuxWindow(db *gorm.DB, sessionName string, windowIndex int, 
 // GetOrCreateWindowMessageQueue gets or creates a message queue for a window
 func GetOrCreateWindowMessageQueue(db *gorm.DB, windowID uint) (*WindowMessageQueue, error) {
 	var queue WindowMessageQueue
-	err := db.Where("window_id = ?", windowID).Preload("Window").First(&queue).Error
+	// Use silent logger for expected "record not found" during queue creation
+	err := db.Session(&gorm.Session{Logger: db.Logger.LogMode(logger.Silent)}).
+		Where("window_id = ?", windowID).Preload("Window").First(&queue).Error
 
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
@@ -338,7 +349,7 @@ func GetOrCreateWindowMessageQueue(db *gorm.DB, windowID uint) (*WindowMessageQu
 			if err := db.Create(&queue).Error; err != nil {
 				return nil, err
 			}
-			// Reload with preloaded window
+			// Reload with preloaded window (no need for silent logger here since record should exist)
 			err = db.Where("window_id = ?", windowID).Preload("Window").First(&queue).Error
 			if err != nil {
 				return nil, err

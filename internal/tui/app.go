@@ -185,36 +185,45 @@ func NewApp(db *gorm.DB, tmuxClient *tmux.Client, usageMonitor *monitor.UsageMon
 
 // Init initializes the TUI application
 func (a *App) Init() tea.Cmd {
-	// Start refresh ticker
-	cfg := config.Get()
-	refreshRate := cfg.TUI.RefreshRate
-	if refreshRate > 0 {
-		a.ticker = time.NewTicker(refreshRate)
+	var cmds []tea.Cmd
 
-		// Start ticker goroutine
-		go func() {
-			defer a.ticker.Stop()
-			for {
-				select {
-				case <-a.ctx.Done():
-					return
-				case <-a.ticker.C:
-					// Tick handled via Update() method, no additional goroutine needed
-					// The tick messages are sent via the tea.Tick command in the return statement
+	// Initialize views
+	cmds = append(cmds, a.dashboard.Init())
+	cmds = append(cmds, a.windows.Init())
+	cmds = append(cmds, a.messages.Init())
+	cmds = append(cmds, a.schedulerView.Init())
+
+	// Start refresh ticker
+	if os.Getenv("TCS_DISABLE_TICKER") != "1" {
+		cfg := config.Get()
+		refreshRate := cfg.TUI.RefreshRate
+		if refreshRate > 0 {
+			a.ticker = time.NewTicker(refreshRate)
+
+			// Start ticker goroutine
+			go func() {
+				defer a.ticker.Stop()
+				for {
+					select {
+					case <-a.ctx.Done():
+						return
+					case <-a.ticker.C:
+						// Tick handled via Update() method, no additional goroutine needed
+						// The tick messages are sent via the tea.Tick command in the return statement
+					}
 				}
-			}
-		}()
+			}()
+		}
+
+		cmds = append(cmds, tea.Tick(time.Second, func(t time.Time) tea.Msg {
+			return TickMsg(t)
+		}))
+		log.Printf("TUI ticker: ENABLED")
+	} else {
+		log.Printf("TUI ticker: DISABLED (TCS_DISABLE_TICKER=1)")
 	}
 
-	return tea.Batch(
-		a.dashboard.Init(),
-		a.windows.Init(),
-		a.messages.Init(),
-		a.schedulerView.Init(),
-		tea.Tick(time.Second, func(t time.Time) tea.Msg {
-			return TickMsg(t)
-		}),
-	)
+	return tea.Batch(cmds...)
 }
 
 // Update handles messages and updates the application state
@@ -262,12 +271,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case TickMsg:
 		// Periodic refresh
-		cmds = append(cmds, func() tea.Msg {
-			return RefreshMsg{}
-		})
-		cmds = append(cmds, tea.Tick(time.Second, func(t time.Time) tea.Msg {
-			return TickMsg(t)
-		}))
+		if os.Getenv("TCS_DISABLE_TICKER") != "1" {
+			cmds = append(cmds, func() tea.Msg {
+				return RefreshMsg{}
+			})
+			cmds = append(cmds, tea.Tick(time.Second, func(t time.Time) tea.Msg {
+				return TickMsg(t)
+			}))
+		}
 
 	case RefreshMsg:
 		// Refresh all views
@@ -516,15 +527,21 @@ func Run() error {
 	}
 
 	// Create window discovery service
-	windowDiscovery := discovery.NewWindowDiscovery(database.GetDB(), tmuxClient, nil)
-	if err := windowDiscovery.Start(); err != nil {
-		return fmt.Errorf("failed to start window discovery: %w", err)
-	}
-	defer func() {
-		if err := windowDiscovery.Stop(); err != nil {
-			log.Printf("Warning: failed to stop window discovery: %v", err)
+	var windowDiscovery *discovery.WindowDiscovery
+	if os.Getenv("TCS_DISABLE_WINDOW_DISCOVERY") != "1" {
+		windowDiscovery = discovery.NewWindowDiscovery(database.GetDB(), tmuxClient, nil)
+		if err := windowDiscovery.Start(); err != nil {
+			return fmt.Errorf("failed to start window discovery: %w", err)
 		}
-	}()
+		defer func() {
+			if err := windowDiscovery.Stop(); err != nil {
+				log.Printf("Warning: failed to stop window discovery: %v", err)
+			}
+		}()
+		log.Printf("Window discovery service: ENABLED")
+	} else {
+		log.Printf("Window discovery service: DISABLED (TCS_DISABLE_WINDOW_DISCOVERY=1)")
+	}
 
 	schedulerInstance := scheduler.NewScheduler(
 		database.GetDB(),
@@ -537,14 +554,19 @@ func Run() error {
 	}
 
 	// Start the scheduler to process messages
-	if err := schedulerInstance.Start(); err != nil {
-		return fmt.Errorf("failed to start scheduler: %w", err)
-	}
-	defer func() {
-		if err := schedulerInstance.Stop(); err != nil {
-			log.Printf("Warning: failed to stop scheduler: %v", err)
+	if os.Getenv("TCS_DISABLE_SCHEDULER") != "1" {
+		if err := schedulerInstance.Start(); err != nil {
+			return fmt.Errorf("failed to start scheduler: %w", err)
 		}
-	}()
+		defer func() {
+			if err := schedulerInstance.Stop(); err != nil {
+				log.Printf("Warning: failed to stop scheduler: %v", err)
+			}
+		}()
+		log.Printf("Scheduler service: ENABLED")
+	} else {
+		log.Printf("Scheduler service: DISABLED (TCS_DISABLE_SCHEDULER=1)")
+	}
 
 	// Create and run TUI app
 	app := NewApp(database.GetDB(), tmuxClient, usageMonitor, windowDiscovery, schedulerInstance)

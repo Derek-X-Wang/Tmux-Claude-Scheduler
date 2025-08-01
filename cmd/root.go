@@ -3,14 +3,17 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/derekxwang/tcs/internal/config"
 	"github.com/derekxwang/tcs/internal/database"
+	"github.com/derekxwang/tcs/internal/discovery"
 	"github.com/derekxwang/tcs/internal/monitor"
 	"github.com/derekxwang/tcs/internal/scheduler"
 	"github.com/derekxwang/tcs/internal/tmux"
@@ -1099,6 +1102,19 @@ func runDaemon() error {
 		return fmt.Errorf("failed to initialize usage monitor: %w", err)
 	}
 
+	// Create and start window discovery service
+	fmt.Println("Starting window discovery...")
+	windowDiscovery := discovery.NewWindowDiscovery(database.GetDB(), tmuxClient, nil)
+	if err := windowDiscovery.Start(); err != nil {
+		return fmt.Errorf("failed to start window discovery: %w", err)
+	}
+	defer func() {
+		fmt.Println("Stopping window discovery...")
+		if err := windowDiscovery.Stop(); err != nil {
+			fmt.Printf("Warning: failed to stop window discovery: %v\n", err)
+		}
+	}()
+
 	// Create scheduler
 	schedulerInstance := scheduler.NewScheduler(
 		database.GetDB(),
@@ -1116,12 +1132,28 @@ func runDaemon() error {
 	if err := schedulerInstance.Start(); err != nil {
 		return fmt.Errorf("failed to start scheduler: %w", err)
 	}
+	defer func() {
+		fmt.Println("Stopping scheduler...")
+		if err := schedulerInstance.Stop(); err != nil {
+			fmt.Printf("Warning: failed to stop scheduler: %v\n", err)
+		}
+	}()
 
-	fmt.Println("✅ TCS Scheduler is running")
+	fmt.Println("✅ TCS Daemon is running")
+	fmt.Println("  - Window Discovery: Scanning tmux windows every 30s")
+	fmt.Println("  - Scheduler: Processing message queue")
+	fmt.Println("  - Usage Monitor: Tracking Claude usage")
 	fmt.Println("Press Ctrl+C to stop")
 
-	// Keep daemon running
-	select {}
+	// Set up signal handling for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// Wait for signal
+	sig := <-sigChan
+	fmt.Printf("\nReceived signal: %v. Shutting down gracefully...\n", sig)
+
+	return nil
 }
 
 func runInit() error {

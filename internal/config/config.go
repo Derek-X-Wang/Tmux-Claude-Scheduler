@@ -65,7 +65,7 @@ type UsageConfig struct {
 	MaxTokens          int           `mapstructure:"max_tokens" json:"max_tokens"`
 	WindowDuration     time.Duration `mapstructure:"window_duration" json:"window_duration"`
 	MonitoringInterval time.Duration `mapstructure:"monitoring_interval" json:"monitoring_interval"`
-	ClaudeResetHour    int           `mapstructure:"claude_reset_hour" json:"claude_reset_hour"` // Hour of day when Claude usage resets (0-23)
+	// NOTE: Claude uses dynamic 5-hour windows that start from the first message sent, not fixed reset times
 }
 
 // LoggingConfig holds logging configuration
@@ -172,7 +172,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("usage.max_tokens", 100000)
 	v.SetDefault("usage.window_duration", 5*time.Hour)
 	v.SetDefault("usage.monitoring_interval", 30*time.Second)
-	v.SetDefault("usage.claude_reset_hour", 11) // 11 AM reset time
+	// NOTE: Claude uses dynamic 5-hour windows starting from first message, not fixed reset times
 
 	// Logging defaults
 	v.SetDefault("logging.level", "info")
@@ -222,10 +222,7 @@ func validateConfig(config *Config) error {
 		return fmt.Errorf("usage window duration must be at least 1 hour")
 	}
 
-	// Validate Claude reset hour
-	if config.Usage.ClaudeResetHour < 0 || config.Usage.ClaudeResetHour > 23 {
-		return fmt.Errorf("claude reset hour must be between 0 and 23, got: %d", config.Usage.ClaudeResetHour)
-	}
+	// NOTE: Claude reset hour validation removed - now using dynamic 5-hour windows
 
 	// Validate logging level
 	validLevels := []string{"debug", "info", "warn", "error", "fatal"}
@@ -308,7 +305,7 @@ func GetUsageConfig() UsageConfig {
 			MaxTokens:          100000,
 			WindowDuration:     5 * time.Hour,
 			MonitoringInterval: 30 * time.Second,
-			ClaudeResetHour:    11,
+			// ClaudeResetHour removed - dynamic windows used instead
 		}
 	}
 	return appConfig.Usage
@@ -416,7 +413,7 @@ func GenerateDefaultConfig(configPath string) error {
 			MaxTokens:          100000,
 			WindowDuration:     5 * time.Hour,
 			MonitoringInterval: 30 * time.Second,
-			ClaudeResetHour:    11,
+			// ClaudeResetHour removed - dynamic windows used instead
 		},
 		Logging: LoggingConfig{
 			Level:  "info",
