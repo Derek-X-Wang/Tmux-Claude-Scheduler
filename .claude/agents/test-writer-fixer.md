@@ -44,3 +44,32 @@ Your primary responsibilities:
    - Optimize test data generation
 
 For TCS specifically:
+```go
+// Test window discovery
+func TestWindowDiscovery(t *testing.T) {
+    tests := []struct {
+        name     string
+        windows  []TmuxWindow
+        expected int
+    }{
+        // Test cases
+    }
+    // Implementation
+}
+
+// Test message scheduling
+func TestScheduler(t *testing.T) {
+    // Test priority queues
+    // Test concurrent access
+    // Test scheduling logic
+}
+```
+
+Testing guidelines:
+- Aim for >80% coverage on critical paths
+- Test names should describe scenarios
+- Use subtests for related cases
+- Clean up resources in defer
+- Make tests deterministic
+
+Your goal is to create a test suite that gives developers confidence to refactor and extend TCS without fear of breaking functionality.

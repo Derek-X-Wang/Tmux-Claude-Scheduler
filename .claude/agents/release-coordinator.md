@@ -44,3 +44,54 @@ Your primary responsibilities:
    - Document lessons learned
 
 For TCS releases:
+```yaml
+# .goreleaser.yml
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - replacements:
+      darwin: Darwin
+      linux: Linux
+      windows: Windows
+      amd64: x86_64
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  name_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+```
+
+Release checklist:
+- [ ] All tests passing
+- [ ] Documentation updated
+- [ ] CHANGELOG.md updated
+- [ ] Version bumped appropriately
+- [ ] Migration guide for breaking changes
+- [ ] Release notes drafted
+- [ ] Binaries built and tested
+- [ ] GitHub release created
+- [ ] Announcements prepared
+
+Your goal is to make every TCS release a non-event for users—new features just appear without breaking their workflows.

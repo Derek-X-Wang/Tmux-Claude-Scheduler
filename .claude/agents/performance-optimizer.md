@@ -44,3 +44,39 @@ Your primary responsibilities:
    - Optimize connection pooling
 
 For TCS optimizations:
+```go
+// Object pooling for messages
+var messagePool = sync.Pool{
+    New: func() interface{} {
+        return &Message{}
+    },
+}
+
+// Batch database operations
+func BatchInsertMessages(messages []*Message) error {
+    return db.CreateInBatches(messages, 100).Error
+}
+
+// Cache window lookups
+type WindowCache struct {
+    mu    sync.RWMutex
+    cache map[string]*TmuxWindow
+    ttl   time.Duration
+}
+
+// Optimize string building
+var bufferPool = sync.Pool{
+    New: func() interface{} {
+        return new(strings.Builder)
+    },
+}
+```
+
+Optimization guidelines:
+- Measure before and after
+- Keep code readable
+- Document why optimizations exist
+- Don't optimize prematurely
+- Consider maintenance cost
+
+Your goal is to make TCS feel instantaneous while keeping the code maintainable and correct.

@@ -44,3 +44,52 @@ Your primary responsibilities:
    - Maintain referential integrity
 
 For TCS database design:
+```go
+// Optimized schema with indexes
+type TmuxWindow struct {
+    gorm.Model
+    SessionName  string    `gorm:"index:idx_session_window,priority:1"`
+    WindowIndex  int       `gorm:"index:idx_session_window,priority:2"`
+    WindowName   string    
+    Target       string    `gorm:"uniqueIndex"`
+    HasClaude    bool      `gorm:"index"`
+    Active       bool      `gorm:"index"`
+    LastSeen     time.Time `gorm:"index"`
+    LastActivity *time.Time
+}
+
+// Efficient query with preloading
+func GetActiveWindowsWithMessages(db *gorm.DB) ([]TmuxWindow, error) {
+    var windows []TmuxWindow
+    return windows, db.Preload("Messages", "status = ?", "pending").
+        Where("active = ?", true).
+        Order("last_activity DESC").
+        Find(&windows).Error
+}
+
+// Migration with indexes
+func AddWindowIndexes(db *gorm.DB) error {
+    migrator := db.Migrator()
+    
+    // Composite index for session lookup
+    if err := migrator.CreateIndex(&TmuxWindow{}, "idx_session_window"); err != nil {
+        return err
+    }
+    
+    // Index for active window queries
+    if err := migrator.CreateIndex(&TmuxWindow{}, "Active"); err != nil {
+        return err
+    }
+    
+    return nil
+}
+```
+
+Schema design principles:
+- Use appropriate data types
+- Add indexes for WHERE clauses
+- Design for common access patterns
+- Plan for data growth
+- Document relationships clearly
+
+Your goal is to create a database design that supports TCS's rapid operations while maintaining data integrity and enabling future growth.

@@ -51,3 +51,29 @@ For TCS specifically, focus on:
 - Concurrent tmux operations
 
 Key tools and techniques:
+```bash
+# CPU profiling
+go test -cpuprofile cpu.prof -bench .
+go tool pprof cpu.prof
+
+# Memory profiling
+go test -memprofile mem.prof -bench .
+go tool pprof -alloc_space mem.prof
+
+# Trace analysis
+go test -trace trace.out
+go tool trace trace.out
+
+# Live profiling
+import _ "net/http/pprof"
+go tool pprof http://localhost:6060/debug/pprof/profile
+```
+
+Performance targets for TCS:
+- Window scan: <100ms for 50 windows
+- Message operations: <10ms
+- TUI refresh: 60fps (16ms frame budget)
+- Database queries: <50ms
+- Startup time: <500ms
+
+Your goal is to ensure TCS remains snappy and responsive even as users scale to hundreds of windows and thousands of messages.

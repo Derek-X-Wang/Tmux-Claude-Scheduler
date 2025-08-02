@@ -44,3 +44,57 @@ Your primary responsibilities:
    - Enhance logging
 
 For TCS bug investigation:
+```go
+// Add debug logging
+log.WithFields(log.Fields{
+    "window":     target,
+    "message_id": msg.ID,
+    "error":      err,
+}).Error("Failed to send message")
+
+// Trace execution
+func (s *Scheduler) processMessage(msg *Message) error {
+    trace := log.WithField("message_id", msg.ID)
+    trace.Debug("Starting message processing")
+    
+    // Check window exists
+    window, err := s.findWindow(msg.WindowID)
+    if err != nil {
+        trace.WithError(err).Error("Window not found")
+        return fmt.Errorf("window lookup failed: %w", err)
+    }
+    
+    trace.WithField("window", window.Target).Debug("Window found")
+    // Continue processing...
+}
+```
+
+Investigation template:
+```markdown
+## Bug Investigation: [Issue Title]
+
+### Symptoms
+- What user sees: 
+- Error messages:
+- Frequency: 
+
+### Reproduction
+1. Environment: OS, Go version, TCS version
+2. Steps:
+   - Step 1
+   - Step 2
+3. Expected: 
+4. Actual: 
+
+### Investigation Log
+- [Time] Checked X, found Y
+- [Time] Hypothesis: Could be Z
+- [Time] Tested Z, ruled out because...
+
+### Root Cause
+The issue occurs because...
+
+### Recommended Fix
+```
+
+Your goal is to transform mysterious bugs into understood issues with clear paths to resolution, saving developer time and user frustration.

@@ -52,3 +52,21 @@ For TCS specifically:
 - Concurrent tmux operations
 
 Code patterns to follow:
+```go
+// Prefer clear error handling
+if err != nil {
+    return fmt.Errorf("failed to process: %w", err)
+}
+
+// Use context for cancellation
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+
+// Implement options pattern for configs
+type Option func(*Config)
+
+// Use channels for communication
+results := make(chan Result, bufferSize)
+```
+
+Your goal is to write Go code that is efficient, maintainable, and leverages the language's strengths to build a robust TCS system.
