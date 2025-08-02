@@ -91,7 +91,7 @@ func (d *Dashboard) initStyles() {
 	d.cardStyle = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("8")).
-		Padding(1).
+		Padding(0, 1). // Reduced vertical padding
 		MarginRight(2).
 		MarginBottom(1)
 }
@@ -152,11 +152,8 @@ func (d *Dashboard) View() string {
 	// Usage overview section
 	sections = append(sections, d.renderUsageOverview())
 
-	// System status section
+	// System status section (now includes quick stats)
 	sections = append(sections, d.renderSystemStatus())
-
-	// Quick stats section
-	sections = append(sections, d.renderQuickStats())
 
 	// Recent activity section
 	sections = append(sections, d.renderRecentActivity())
@@ -438,7 +435,9 @@ func (d *Dashboard) renderUsageOverview() string {
 	// Main title
 	var title string
 	if usage.DynamicLimits {
-		title = "📊 Session-Based Dynamic Limits\nBased on your historical usage patterns when hitting limits (P90)"
+		title = "📊 Session-Based Dynamic Limits"
+		// Subtitle on same line to save space
+		title += " (P90 historical patterns)"
 	} else {
 		title = "📊 Usage Overview"
 	}
@@ -476,18 +475,21 @@ func (d *Dashboard) renderUsageOverview() string {
 		return value
 	}
 
+	// Adjust progress bar width to be more compact
+	d.usageProgress.Width = min(35, d.width-60)
+
 	// Cost usage line (most important)
 	costIcon, costColor := getUsageColor(costPercentage)
 	costStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(costColor))
 	costBar := d.usageProgress.ViewAs(clampToOne(costPercentage))
-	costLine := fmt.Sprintf("💰 Cost Usage:           %s [%s] %.1f%%    $%.2f / $%.2f",
+	costLine := fmt.Sprintf("💰 Cost:      %s [%s] %.1f%%  $%.2f/$%.2f",
 		costIcon, costBar, costPercentage*100, usage.CostUsed, usage.CostLimit)
 
 	// Token usage line
 	tokenIcon, tokenColor := getUsageColor(tokenPercentage)
 	tokenStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(tokenColor))
 	tokenBar := d.usageProgress.ViewAs(clampToOne(tokenPercentage))
-	tokenLine := fmt.Sprintf("📊 Token Usage:          %s [%s] %.1f%%    %s / %s",
+	tokenLine := fmt.Sprintf("📊 Tokens:    %s [%s] %.1f%%  %s/%s",
 		tokenIcon, tokenBar, tokenPercentage*100,
 		d.formatNumber(usage.TokensUsed), d.formatNumber(usage.TokensLimit))
 
@@ -495,36 +497,40 @@ func (d *Dashboard) renderUsageOverview() string {
 	messageIcon, messageColor := getUsageColor(messagePercentage)
 	messageStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(messageColor))
 	messageBar := d.usageProgress.ViewAs(clampToOne(messagePercentage))
-	messageLine := fmt.Sprintf("📨 Messages Usage:       %s [%s] %.1f%%    %d / %d",
+	messageLine := fmt.Sprintf("📨 Messages:  %s [%s] %.1f%%  %d/%d",
 		messageIcon, messageBar, messagePercentage*100, usage.MessagesUsed, usage.MessagesLimit)
 
-	// Time remaining
+	// Time remaining - more compact format
 	timeUsed := 1.0 - (float64(usage.TimeRemaining.Seconds()) / (5 * time.Hour).Seconds())
 	timeIcon, timeColor := getUsageColor(timeUsed)
 	timeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(timeColor))
 	timeBar := d.usageProgress.ViewAs(clampToOne(timeUsed))
-	timeLine := fmt.Sprintf("⏱️  Time to Reset:       %s [%s] %s",
+	timeLine := fmt.Sprintf("⏱️  Reset in:  %s [%s] %s",
 		timeIcon, timeBar, usage.TimeRemaining.Round(time.Minute).String())
 
 	// Status message
 	var statusColor lipgloss.Color = "10" // Green
-	var statusText = "✓ Can send messages"
+	var statusText = "✓ Can send"
 	if !usage.CanSendMessage {
 		statusColor = "9" // Red
-		statusText = "✗ Cannot send messages"
+		statusText = "✗ Cannot send"
 	}
 	statusStyle := lipgloss.NewStyle().Bold(true).Foreground(statusColor)
 
+	// Combine window time and status on one line
+	windowLine := fmt.Sprintf("Window: %s - %s • Status: %s",
+		d.valueStyle.Render(usage.WindowStartTime.Format("15:04")),
+		d.valueStyle.Render(usage.WindowEndTime.Format("15:04")),
+		statusStyle.Render(statusText))
+
 	content := fmt.Sprintf(
-		"%s\n────────────────────────────────────────────────────────────\n%s\n\n%s\n\n%s\n────────────────────────────────────────────────────────────\n%s\n\nWindow: %s - %s\nStatus: %s",
+		"%s\n──────────────────────────\n%s\n%s\n%s\n──────────────────────────\n%s\n\n%s",
 		d.sectionStyle.Render(title),
 		costStyle.Render(costLine),
 		tokenStyle.Render(tokenLine),
 		messageStyle.Render(messageLine),
 		timeStyle.Render(timeLine),
-		d.valueStyle.Render(usage.WindowStartTime.Format("15:04")),
-		d.valueStyle.Render(usage.WindowEndTime.Format("15:04")),
-		statusStyle.Render(statusText),
+		windowLine,
 	)
 
 	return d.cardStyle.Width(d.width - 4).Render(content)
@@ -570,83 +576,59 @@ func addCommas(n int) string {
 // renderSystemStatus renders the system status section
 func (d *Dashboard) renderSystemStatus() string {
 	system := d.state.System
+	db := d.state.Database
 
-	// Tmux status
-	tmuxStatus := "✗ Disconnected"
+	// Left column: System Status
+	tmuxStatus := "✗"
 	tmuxColor := lipgloss.Color("9")
 	if system.TmuxRunning {
-		tmuxStatus = fmt.Sprintf("✓ Connected (%d sessions)", len(system.TmuxSessions))
+		tmuxStatus = fmt.Sprintf("✓ (%d)", len(system.TmuxSessions))
 		tmuxColor = lipgloss.Color("10")
 	}
 
-	// Database status
-	dbStatus := "✗ Disconnected"
+	dbStatus := "✗"
 	dbColor := lipgloss.Color("9")
 	if system.DatabaseConnected {
-		dbStatus = "✓ Connected"
+		dbStatus = "✓"
 		dbColor = lipgloss.Color("10")
 	}
 
-	content := fmt.Sprintf(
-		"%s\n\nTmux: %s\nDatabase: %s\nConfig: %s\nLast Refresh: %s",
-		d.sectionStyle.Render("🔧 System Status"),
+	leftColumn := fmt.Sprintf(
+		"🔧 System Status\nTmux: %s  DB: %s\nRefresh: %s",
 		lipgloss.NewStyle().Foreground(tmuxColor).Render(tmuxStatus),
 		lipgloss.NewStyle().Foreground(dbColor).Render(dbStatus),
-		d.valueStyle.Render(system.ConfigPath),
-		d.valueStyle.Render(system.LastRefresh.Format("15:04:05")),
+		d.valueStyle.Render(d.lastUpdate.Format("15:04:05")),
 	)
 
-	return d.cardStyle.Width(d.width/2 - 2).Render(content)
-}
-
-// renderQuickStats renders the quick stats section
-func (d *Dashboard) renderQuickStats() string {
-	db := d.state.Database
-	scheduler := d.state.Scheduler
-
-	content := fmt.Sprintf(
-		"%s\n\nSessions: %s\nMessages: %s\nPending: %s\nSchedulers: %s",
-		d.sectionStyle.Render("📈 Quick Stats"),
-		d.valueStyle.Render(fmt.Sprintf("%d total, %d active", db.TotalSessions, db.ActiveSessions)),
-		d.valueStyle.Render(fmt.Sprintf("%d total (%d sent, %d failed)",
-			db.TotalMessages, db.SentMessages, db.FailedMessages)),
-		d.valueStyle.Render(strconv.Itoa(scheduler.PendingMessages)),
-		d.renderSchedulerStatus(scheduler),
+	// Right column: Quick Stats
+	rightColumn := fmt.Sprintf(
+		"📈 Quick Stats\nSessions: %d total, %d active\nMessages: %d (%d sent)",
+		db.TotalSessions, db.ActiveSessions,
+		db.TotalMessages, db.SentMessages,
 	)
 
-	return d.cardStyle.Width(d.width/2 - 2).Render(content)
-}
+	// Combine columns side by side
+	leftStyle := lipgloss.NewStyle().Width(d.width/2 - 6).Align(lipgloss.Left)
+	rightStyle := lipgloss.NewStyle().Width(d.width/2 - 6).Align(lipgloss.Left)
 
-// renderRecentActivity renders the recent activity section
-func (d *Dashboard) renderRecentActivity() string {
-	content := fmt.Sprintf(
-		"%s\n\n%s\n%s\n%s",
-		d.sectionStyle.Render("⚡ Recent Activity"),
-		"• Dashboard refreshed at "+d.lastUpdate.Format("15:04:05"),
-		"• Monitoring "+strconv.Itoa(d.state.Database.ActiveSessions)+" active sessions",
-		"• Processing "+strconv.Itoa(d.state.Scheduler.PendingMessages)+" pending messages",
+	content := lipgloss.JoinHorizontal(lipgloss.Top,
+		leftStyle.Render(leftColumn),
+		rightStyle.Render(rightColumn),
 	)
 
 	return d.cardStyle.Width(d.width - 4).Render(content)
 }
 
-// renderSchedulerStatus renders scheduler status
-func (d *Dashboard) renderSchedulerStatus(scheduler types.SchedulerStats) string {
-	var status []string
+// renderRecentActivity renders the recent activity section
+func (d *Dashboard) renderRecentActivity() string {
+	// More compact format - single line
+	content := fmt.Sprintf(
+		"⚡ Recent: Monitoring %d sessions • %d pending messages",
+		d.state.Database.ActiveSessions,
+		d.state.Scheduler.PendingMessages,
+	)
 
-	if scheduler.SmartSchedulerEnabled {
-		status = append(status, "Smart")
-	}
-	if scheduler.CronSchedulerEnabled {
-		status = append(status, "Cron")
-	}
-
-	if len(status) == 0 {
-		return d.errorStyle.Render("None")
-	}
-
-	return d.successStyle.Render(fmt.Sprintf("%s enabled",
-		lipgloss.JoinHorizontal(lipgloss.Left, status...)))
+	return d.cardStyle.Width(d.width - 4).Render(content)
 }
 
 // min returns the minimum of two integers

@@ -211,10 +211,10 @@ func (r *ClaudeDataReader) findCurrentSession(entries []UsageEntry) (time.Time, 
 		}
 	}
 
-	// Claude's key behavior: Find the CLOSEST session to current time
-	// This matches how Claude Monitor tracks the active 5-hour window
+	// Claude's key behavior: Sessions are sequential, not overlapping
+	// A new session starts only after the previous one expires
 
-	// Build all possible 5-hour sessions from the data
+	// Build sequential 5-hour sessions from the data
 	type session struct {
 		start        time.Time
 		end          time.Time
@@ -222,93 +222,83 @@ func (r *ClaudeDataReader) findCurrentSession(entries []UsageEntry) (time.Time, 
 		entries      []UsageEntry
 	}
 
-	sessions := make(map[string]*session)
+	var sessions []session
+	var currentSession *session
 
-	// Group entries into 5-hour blocks based on first message in each block
+	// Create sessions sequentially based on 5-hour windows
 	for _, entry := range entries {
 		entryTime := entry.Timestamp.UTC()
-		roundedStart := r.roundToHour(entryTime)
-		sessionKey := roundedStart.Format("2006-01-02 15:04")
 
-		s := sessions[sessionKey]
-		if s == nil {
-			s = &session{
+		// Check if we need a new session
+		if currentSession == nil || entryTime.After(currentSession.end) || entryTime.Before(currentSession.start) {
+			// Save previous session if exists
+			if currentSession != nil && currentSession.messageCount > 0 {
+				sessions = append(sessions, *currentSession)
+			}
+
+			// Create new session starting from this entry's rounded hour
+			roundedStart := r.roundToHour(entryTime)
+			currentSession = &session{
 				start:        roundedStart,
 				end:          roundedStart.Add(5 * time.Hour),
 				messageCount: 0,
 				entries:      []UsageEntry{},
 			}
-			sessions[sessionKey] = s
 		}
 
-		// Add entry if it falls within this session's 5-hour window
-		if (entryTime.Equal(s.start) || entryTime.After(s.start)) && entryTime.Before(s.end) {
-			s.entries = append(s.entries, entry)
-			s.messageCount++
-		}
+		// Add entry to current session
+		currentSession.entries = append(currentSession.entries, entry)
+		currentSession.messageCount++
 	}
 
-	// Find the best session:
-	// 1. First priority: Session that contains current time
-	// 2. Second priority: Most recent session that hasn't expired too long ago
-	// 3. Third priority: Next upcoming session if we're between sessions
+	// Don't forget the last session
+	if currentSession != nil && currentSession.messageCount > 0 {
+		sessions = append(sessions, *currentSession)
+	}
 
-	var activeSession *session
-	var closestSession *session
-	var minTimeDiff time.Duration
+	// Debug log all sessions
+	debugFile, _ := os.OpenFile("/tmp/tcs-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if debugFile != nil {
+		fmt.Fprintf(debugFile, "DEBUG findCurrentSession: found %d sessions\n", len(sessions))
+		for i, s := range sessions {
+			fmt.Fprintf(debugFile, "  Session %d: %s - %s (%d messages)\n",
+				i, s.start.Format("15:04"), s.end.Format("15:04"), s.messageCount)
+		}
+		debugFile.Close()
+	}
 
+	// Find the active session (contains current time)
 	for _, s := range sessions {
-		// Check if current time is within this session
 		if (now.Equal(s.start) || now.After(s.start)) && now.Before(s.end) {
-			activeSession = s
 			debugFile, _ := os.OpenFile("/tmp/tcs-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 			if debugFile != nil {
-				fmt.Fprintf(debugFile, "DEBUG found active session containing current time: %s - %s (%d messages)\n",
+				fmt.Fprintf(debugFile, "DEBUG found active session: %s - %s (%d messages)\n",
 					s.start.Format("15:04"), s.end.Format("15:04"), s.messageCount)
 				debugFile.Close()
 			}
-			break
-		}
-
-		// Calculate how close this session is to current time
-		var timeDiff time.Duration
-		if now.Before(s.start) {
-			// Future session
-			timeDiff = s.start.Sub(now)
-		} else if now.After(s.end) {
-			// Past session
-			timeDiff = now.Sub(s.end)
-		} else {
-			// Current time is within session
-			timeDiff = 0
-		}
-
-		// Track closest session with significant activity (>50 messages)
-		if s.messageCount > 50 && (closestSession == nil || timeDiff < minTimeDiff) {
-			closestSession = s
-			minTimeDiff = timeDiff
+			return s.start, s.end
 		}
 	}
 
-	// Use active session if found
-	if activeSession != nil {
-		return activeSession.start, activeSession.end
-	}
-
-	// Use closest session if it's within reasonable time (last 12 hours)
-	if closestSession != nil && minTimeDiff < 12*time.Hour {
-		debugFile, _ := os.OpenFile("/tmp/tcs-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-		if debugFile != nil {
-			fmt.Fprintf(debugFile, "DEBUG using closest session (%.1f hours away): %s - %s (%d messages)\n",
-				minTimeDiff.Hours(), closestSession.start.Format("15:04"), closestSession.end.Format("15:04"), closestSession.messageCount)
-			debugFile.Close()
+	// If no active session, find the most recent expired session
+	// (This handles the case where we're between sessions)
+	if len(sessions) > 0 {
+		lastSession := sessions[len(sessions)-1]
+		if now.After(lastSession.end) {
+			// We're after the last session - keep showing it until new activity
+			debugFile, _ := os.OpenFile("/tmp/tcs-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+			if debugFile != nil {
+				fmt.Fprintf(debugFile, "DEBUG using most recent expired session: %s - %s (%d messages)\n",
+					lastSession.start.Format("15:04"), lastSession.end.Format("15:04"), lastSession.messageCount)
+				debugFile.Close()
+			}
+			return lastSession.start, lastSession.end
 		}
-		return closestSession.start, closestSession.end
 	}
 
-	// If no good session found, create a new one starting now
+	// If no sessions at all or current time is before all sessions, create a new one
 	newStart := r.roundToHour(now)
-	debugFile, _ := os.OpenFile("/tmp/tcs-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	debugFile, _ = os.OpenFile("/tmp/tcs-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if debugFile != nil {
 		fmt.Fprintf(debugFile, "DEBUG creating new session starting now: %s - %s\n",
 			newStart.Format("15:04"), newStart.Add(5*time.Hour).Format("15:04"))
