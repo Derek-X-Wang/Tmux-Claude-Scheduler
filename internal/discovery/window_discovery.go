@@ -51,7 +51,7 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		ScanInterval:       30 * time.Second,
-		InactiveTimeout:    5 * time.Minute,
+		InactiveTimeout:    15 * time.Minute, // Give windows more time before marking inactive
 		ClaudeDetection:    true,
 		PersistDiscovered:  true,
 		MaxConcurrentScans: 5,

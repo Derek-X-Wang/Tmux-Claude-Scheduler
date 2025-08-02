@@ -157,7 +157,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("database.conn_max_life", time.Hour)
 
 	// TUI defaults
-	v.SetDefault("tui.refresh_rate", time.Second)
+	v.SetDefault("tui.refresh_rate", 5*time.Second)
 	v.SetDefault("tui.theme", "default")
 	v.SetDefault("tui.show_debug_info", false)
 
@@ -278,7 +278,7 @@ func GetDatabaseConfig() DatabaseConfig {
 func GetTUIConfig() TUIConfig {
 	if appConfig == nil {
 		return TUIConfig{
-			RefreshRate:   time.Second,
+			RefreshRate:   5 * time.Second,
 			Theme:         "default",
 			ShowDebugInfo: false,
 		}
@@ -400,7 +400,7 @@ func GenerateDefaultConfig(configPath string) error {
 			ConnMaxLife:  time.Hour,
 		},
 		TUI: TUIConfig{
-			RefreshRate:   time.Second,
+			RefreshRate:   5 * time.Second,
 			Theme:         "default",
 			ShowDebugInfo: false,
 		},

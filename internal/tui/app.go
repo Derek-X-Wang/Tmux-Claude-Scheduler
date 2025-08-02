@@ -48,9 +48,6 @@ type App struct {
 	// Key bindings
 	keyMap KeyMap
 
-	// Update ticker
-	ticker *time.Ticker
-
 	// Context for cleanup
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -198,27 +195,12 @@ func (a *App) Init() tea.Cmd {
 		cfg := config.Get()
 		refreshRate := cfg.TUI.RefreshRate
 		if refreshRate > 0 {
-			a.ticker = time.NewTicker(refreshRate)
-
-			// Start ticker goroutine
-			go func() {
-				defer a.ticker.Stop()
-				for {
-					select {
-					case <-a.ctx.Done():
-						return
-					case <-a.ticker.C:
-						// Tick handled via Update() method, no additional goroutine needed
-						// The tick messages are sent via the tea.Tick command in the return statement
-					}
-				}
-			}()
+			// Use only tea.Tick, remove redundant time.Ticker and goroutine
+			cmds = append(cmds, tea.Tick(refreshRate, func(t time.Time) tea.Msg {
+				return TickMsg(t)
+			}))
 		}
-
-		cmds = append(cmds, tea.Tick(time.Second, func(t time.Time) tea.Msg {
-			return TickMsg(t)
-		}))
-		log.Printf("TUI ticker: ENABLED")
+		log.Printf("TUI ticker: ENABLED (refresh rate: %v)", refreshRate)
 	} else {
 		log.Printf("TUI ticker: DISABLED (TCS_DISABLE_TICKER=1)")
 	}
@@ -262,19 +244,19 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, a.keyMap.Dashboard) && !hasActiveForm:
 			a.currentView = DashboardView
-			return a, nil
+			cmds = append(cmds, a.dashboard.Refresh())
 
 		case key.Matches(msg, a.keyMap.Windows) && !hasActiveForm:
 			a.currentView = WindowsView
-			return a, nil
+			cmds = append(cmds, a.windows.Refresh())
 
 		case key.Matches(msg, a.keyMap.Messages) && !hasActiveForm:
 			a.currentView = MessagesView
-			return a, nil
+			cmds = append(cmds, a.messages.Refresh())
 
 		case key.Matches(msg, a.keyMap.Scheduler) && !hasActiveForm:
 			a.currentView = SchedulerView
-			return a, nil
+			cmds = append(cmds, a.schedulerView.Refresh())
 
 		case key.Matches(msg, a.keyMap.Refresh) && !hasActiveForm:
 			cmds = append(cmds, func() tea.Msg {
@@ -285,20 +267,30 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case TickMsg:
 		// Periodic refresh
 		if os.Getenv("TCS_DISABLE_TICKER") != "1" {
+			cfg := config.Get()
+			refreshRate := cfg.TUI.RefreshRate
+
 			cmds = append(cmds, func() tea.Msg {
 				return RefreshMsg{}
 			})
-			cmds = append(cmds, tea.Tick(time.Second, func(t time.Time) tea.Msg {
+			// Use configured refresh rate instead of hardcoded 1 second
+			cmds = append(cmds, tea.Tick(refreshRate, func(t time.Time) tea.Msg {
 				return TickMsg(t)
 			}))
 		}
 
 	case RefreshMsg:
-		// Refresh all views
-		cmds = append(cmds, a.dashboard.Refresh())
-		cmds = append(cmds, a.windows.Refresh())
-		cmds = append(cmds, a.messages.Refresh())
-		cmds = append(cmds, a.schedulerView.Refresh())
+		// Only refresh the current view to reduce load
+		switch a.currentView {
+		case DashboardView:
+			cmds = append(cmds, a.dashboard.Refresh())
+		case WindowsView:
+			cmds = append(cmds, a.windows.Refresh())
+		case MessagesView:
+			cmds = append(cmds, a.messages.Refresh())
+		case SchedulerView:
+			cmds = append(cmds, a.schedulerView.Refresh())
+		}
 
 	case ViewChangeMsg:
 		a.currentView = ViewType(msg)
@@ -403,9 +395,6 @@ func (a *App) renderFooter() string {
 
 // cleanup performs cleanup when the app is shutting down
 func (a *App) cleanup() {
-	if a.ticker != nil {
-		a.ticker.Stop()
-	}
 	if a.cancel != nil {
 		a.cancel()
 	}
